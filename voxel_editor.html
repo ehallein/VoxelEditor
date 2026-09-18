@@ -1,0 +1,1438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voxel Terrain Editor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root{
+    --bg:#14181d; --panel:#1b2026; --panel2:#20262d; --line:#2c333b;
+    --ink:#dfe6ec; --dim:#8b98a5; --accent:#4fb8ae; --accent2:#e0a458;
+    --danger:#d9705f; --ok:#6cbf7a; --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]){
+      --bg:#eef1f3; --panel:#ffffff; --panel2:#f4f6f7; --line:#dbe0e4;
+      --ink:#1b2126; --dim:#5c6873;
+    }
+  }
+  :root[data-theme="dark"]{ --bg:#14181d; --panel:#1b2026; --panel2:#20262d; --line:#2c333b; --ink:#dfe6ec; --dim:#8b98a5; }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden;}
+  #app{display:grid;grid-template-columns:280px 1fr;grid-template-rows:48px 1fr;height:100vh;width:100vw;}
+  header{grid-column:1/3;display:flex;align-items:center;gap:14px;padding:0 14px;background:var(--panel);border-bottom:1px solid var(--line);}
+  header h1{font-size:14px;font-weight:600;margin:0;letter-spacing:.2px;}
+  header .spacer{flex:1;}
+  .filebtn{position:relative;overflow:hidden;}
+  .filebtn input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;}
+  button, .btn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:6px;font-size:12.5px;cursor:pointer;transition:border-color .15s;}
+  button:hover, .btn:hover{border-color:var(--accent);}
+  button:disabled{opacity:.4;cursor:default;}
+  button.primary{background:var(--accent);color:#0d1114;border-color:var(--accent);font-weight:600;}
+  button.primary:hover{filter:brightness(1.08);}
+  button.active{border-color:var(--accent2);box-shadow:0 0 0 1px var(--accent2) inset;}
+  #status{font-size:11.5px;color:var(--dim);font-family:var(--mono);}
+  #left{background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:14px;}
+  section{display:flex;flex-direction:column;gap:8px;}
+  section h2{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 2px 0;font-weight:600;}
+  .row{display:flex;align-items:center;gap:8px;}
+  .row label{font-size:12px;color:var(--dim);width:70px;flex-shrink:0;}
+  .row input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:5px 7px;border-radius:5px;font-size:12px;font-family:var(--mono);}
+  .row input[type=range]{width:100%;accent-color:var(--accent);}
+  .toolgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+  .hint{font-size:11px;color:var(--dim);line-height:1.5;}
+  #main{position:relative;overflow:hidden;background:#0c0f12;}
+  #view3d{position:absolute;inset:0;}
+  #minimapWrap{position:absolute;bottom:14px;right:14px;width:260px;height:260px;z-index:20;}
+  #minimapWrap.mm-full{left:14px;right:14px;top:14px;bottom:14px;width:auto;height:auto;z-index:40;}
+  #minimap{position:absolute;inset:0;width:100%;height:100%;border:1px solid var(--line);border-radius:6px;cursor:crosshair;background:#0a0c0e;display:block;}
+  #minimapLabel{position:absolute;bottom:100%;left:0;margin-bottom:4px;font-size:10.5px;color:var(--dim);font-family:var(--mono);}
+  #minimapFullscreenBtn{position:absolute;bottom:100%;right:0;margin-bottom:4px;width:26px;height:22px;padding:0;line-height:20px;text-align:center;border-radius:6px;}
+  #overlay{position:absolute;top:12px;left:12px;font-family:var(--mono);font-size:11.5px;color:var(--dim);background:rgba(20,24,29,.55);padding:8px 10px;border-radius:6px;pointer-events:none;line-height:1.6;}
+  #overlay b{color:var(--ink);}
+  #dropHint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--dim);font-size:13px;text-align:center;}
+  #dropHint b{color:var(--ink);font-size:16px;}
+  #progress{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--panel);border:1px solid var(--line);padding:16px 22px;border-radius:8px;font-size:12.5px;display:none;text-align:center;gap:8px;flex-direction:column;min-width:220px;z-index:50;}
+  #progress .bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;}
+  #progress .bar div{height:100%;background:var(--accent);width:0%;}
+  .flag{font-size:11px;padding:2px 7px;border-radius:10px;display:inline-block;}
+  .flag.ok{background:rgba(108,191,122,.15);color:var(--ok);}
+  .flag.bad{background:rgba(217,112,95,.15);color:var(--danger);}
+  select{background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:5px 7px;border-radius:5px;font-size:12px;width:100%;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Voxel Terrain Editor</h1>
+    <span id="status">no file loaded</span>
+    <div class="spacer"></div>
+    <div class="btn filebtn">Load .voxel.json + .voxel.bin
+      <input id="fileInput" type="file" multiple accept=".json,.bin,.voxel.json,.voxel.bin">
+    </div>
+    <button id="exportBtn" disabled>Export edited (.zip)</button>
+  </header>
+  <div id="left">
+    <section>
+      <h2>File</h2>
+      <div class="hint" id="fileInfo">Load a <code>.voxel.json</code> and its matching <code>.voxel.bin</code> together (select both in the file picker).</div>
+    </section>
+    <section id="toolsSection" style="display:none">
+      <h2>Tool</h2>
+      <div class="toolgrid">
+        <button id="toolAdd" class="active">Add / fill (1)</button>
+        <button id="toolRemove">Remove (2)</button>
+        <button id="toolFlatten">Flatten box (3)</button>
+        <button id="toolOrbit">Camera only (4)</button>
+      </div>
+      <div class="row"><label>Width Ø</label><input id="brushWidth" type="range" min="1" max="48" value="8"><span id="brushWidthVal" style="font-family:var(--mono);font-size:11px;width:26px;text-align:right">8</span></div>
+      <div class="row"><label>Height Ø</label><input id="brushHeight" type="range" min="1" max="48" value="8"><span id="brushHeightVal" style="font-family:var(--mono);font-size:11px;width:26px;text-align:right">8</span></div>
+      <div class="hint">Diameter in voxels — set both to 1 for a single-voxel brush.</div>
+      <div class="row"><label>Shape</label>
+        <select id="brushShape"><option value="sphere">Sphere</option><option value="cube">Cube</option></select>
+      </div>
+    </section>
+    <section id="flattenSection" style="display:none">
+      <h2>Flatten area</h2>
+      <div class="toolgrid">
+        <button id="flattenModeBox" class="active">Box</button>
+        <button id="flattenModePolygon">Polygon</button>
+      </div>
+      <div class="hint" id="flattenHint">Drag a rectangle on the minimap to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.</div>
+      <div class="toolgrid" id="polygonButtons" style="display:none">
+        <button id="finishPolygon" class="btn">Finish shape</button>
+        <button id="clearPolygon" class="btn">Clear points</button>
+      </div>
+      <div class="row"><label>Gradient</label><input id="flattenGradient" type="checkbox"></div>
+      <div class="hint" id="gradientHint" style="display:none">Samples the current terrain height at each corner/point and interpolates a slope between them, instead of one flat target height. Edit any value to override it, or Resample.</div>
+      <div id="flattenFlatControls" style="display:flex;flex-direction:column;gap:8px">
+        <div class="row"><label>Target Y</label><input id="flattenY" type="number" step="0.1"></div>
+        <button id="sampleHeight" class="btn">Sample height at last click</button>
+      </div>
+      <div id="flattenGradientControls" style="display:none;flex-direction:column;gap:8px">
+        <div id="gradientBoxControls" class="toolgrid">
+          <div class="row"><label>−X −Z</label><input id="cornerH00" type="number" step="0.1"></div>
+          <div class="row"><label>+X −Z</label><input id="cornerH10" type="number" step="0.1"></div>
+          <div class="row"><label>−X +Z</label><input id="cornerH01" type="number" step="0.1"></div>
+          <div class="row"><label>+X +Z</label><input id="cornerH11" type="number" step="0.1"></div>
+        </div>
+        <div id="gradientPolygonControls" style="display:flex;flex-direction:column;gap:8px"></div>
+        <button id="resampleGradient" class="btn">Resample from terrain</button>
+      </div>
+      <button id="applyFlatten" class="primary">Apply flatten</button>
+    </section>
+    <section id="navSection" style="display:none">
+      <h2>Navigate</h2>
+      <div class="hint">Drag = orbit · scroll = zoom · WASD = move focus · Q/E = focus up/down. Click the minimap to jump the focus point. Scroll the minimap to zoom it.</div>
+      <button id="toggleOverview" class="btn">Show entire model</button>
+      <div class="hint" id="overviewHint" style="display:none">Low-detail whole-scene view (each leaf block is one box — no per-voxel surface, no editing here). Click anywhere to jump there and switch back to the detailed, editable view.</div>
+      <div class="row"><label>Render r</label><input id="renderRadius" type="range" min="1" max="6" value="3"><span id="renderRadiusVal" style="font-family:var(--mono);font-size:11px;width:16px">3</span></div>
+    </section>
+    <section id="clipSection" style="display:none">
+      <h2>Height clip</h2>
+      <div class="hint">Hide everything above a height so you can see and edit the ground. This only affects the 3D view — editing still works on whatever surface is visible.</div>
+      <div class="row"><label id="clipLabel">off</label><input id="heightClip" type="range" step="0.01"></div>
+      <button id="resetClip" class="btn">Reset (show all)</button>
+    </section>
+    <section id="editSection" style="display:none">
+      <h2>Edit</h2>
+      <div class="toolgrid">
+        <button id="undoBtn">Undo (⌘Z)</button>
+        <button id="redoBtn">Redo (⌘⇧Z)</button>
+      </div>
+      <div class="hint" id="editCount">0 edits on stack</div>
+    </section>
+    <section id="checkSection" style="display:none">
+      <h2>Parse check</h2>
+      <div id="checkResult" class="hint"></div>
+    </section>
+  </div>
+  <div id="main">
+    <div id="view3d"></div>
+    <div id="minimapWrap">
+      <div id="minimapLabel">click to jump · drag/click to select area · scroll to zoom · dblclick to reset</div>
+      <button id="minimapFullscreenBtn" title="Toggle fullscreen minimap">⤢</button>
+      <canvas id="minimap" width="260" height="260"></canvas>
+    </div>
+    <div id="overlay"></div>
+    <div id="dropHint"><b>No terrain loaded</b><span>Use "Load .voxel.json + .voxel.bin" above — select both files at once.</span></div>
+    <div id="progress"><div id="progressLabel">Working…</div><div class="bar"><div id="progressBar"></div></div></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ======================================================================
+   PART 1 — voxel octree codec (Laine–Karras layout, PlayCanvas splat-
+   transform .voxel.json / .voxel.bin format v1.1).
+   This codec was verified against a real terrain.voxel.{json,bin} pair:
+   node-type counts match the header exactly, 500k random-sample decode
+   round-trips were bit-identical, and edit/undo/re-encode round trips
+   were bit-identical too. See node word format notes inline.
+   ====================================================================== */
+const SOLID = 0, LEAF = 1, INTERIOR = 2;
+
+function decodeTree(nodesU32, leafDataU32, treeDepth) {
+  function decode(idx) {
+    const w = nodesU32[idx] >>> 0;
+    const tb = w >>> 24;
+    if (tb === 0) {
+      const i = w & 0xFFFFFF;
+      return { t: LEAF, lo: leafDataU32[2 * i] >>> 0, hi: leafDataU32[2 * i + 1] >>> 0 };
+    }
+    if (tb === 0xFF && (w & 0xFFFFFF) === 0) return { t: SOLID };
+    const childMask = tb, firstChild = w & 0xFFFFFF;
+    const c = new Array(8).fill(null);
+    let n = 0;
+    for (let oct = 0; oct < 8; oct++) {
+      if (childMask & (1 << oct)) { c[oct] = decode(firstChild + n); n++; }
+    }
+    return { t: INTERIOR, c };
+  }
+  if (nodesU32.length === 0) return null;
+  return decode(0);
+}
+
+function encodeTree(root) {
+  const nodes = [], leafData = [];
+  let numInteriorNodes = 0, numMixedLeaves = 0;
+  if (root === null) return { nodes: new Uint32Array(0), leafData: new Uint32Array(0), numInteriorNodes: 0, numMixedLeaves: 0 };
+  nodes.push(0);
+  const queue = [{ idx: 0, node: root }];
+  let qi = 0;
+  while (qi < queue.length) {
+    const { idx, node } = queue[qi++];
+    if (node.t === SOLID) {
+      nodes[idx] = 0xFF000000 >>> 0;
+    } else if (node.t === LEAF) {
+      const i = leafData.length / 2;
+      leafData.push(node.lo >>> 0, node.hi >>> 0);
+      nodes[idx] = i >>> 0;
+      numMixedLeaves++;
+    } else {
+      let childMask = 0; const present = [];
+      for (let oct = 0; oct < 8; oct++) if (node.c[oct] !== null) { childMask |= (1 << oct); present.push(node.c[oct]); }
+      const firstChild = nodes.length;
+      for (let k = 0; k < present.length; k++) {
+        const childIdx = nodes.length;
+        nodes.push(0);
+        queue.push({ idx: childIdx, node: present[k] });
+      }
+      nodes[idx] = ((childMask << 24) >>> 0) | firstChild;
+      numInteriorNodes++;
+    }
+  }
+  return { nodes: Uint32Array.from(nodes), leafData: Uint32Array.from(leafData), numInteriorNodes, numMixedLeaves };
+}
+
+function compact(node) {
+  if (node === null || node.t !== INTERIOR) return node;
+  let allSolid = true, anyPresent = false;
+  for (let oct = 0; oct < 8; oct++) {
+    node.c[oct] = compact(node.c[oct]);
+    if (node.c[oct] !== null) anyPresent = true;
+    if (node.c[oct] === null || node.c[oct].t !== SOLID) allSolid = false;
+  }
+  if (!anyPresent) return null;
+  if (allSolid) return { t: SOLID };
+  return node;
+}
+
+function getVoxel(root, treeDepth, vx, vy, vz) {
+  let node = root, depth = 0;
+  let bx = vx >> 2, by = vy >> 2, bz = vz >> 2;
+  while (depth < treeDepth) {
+    if (node === null) return false;
+    if (node.t === SOLID) return true;
+    const bit = treeDepth - 1 - depth;
+    const oct = ((bx >> bit) & 1) | (((by >> bit) & 1) << 1) | (((bz >> bit) & 1) << 2);
+    node = node.c[oct]; depth++;
+  }
+  if (node === null) return false;
+  if (node.t === SOLID) return true;
+  const lx = vx & 3, ly = vy & 3, lz = vz & 3;
+  const bitIdx = lx + 4 * ly + 16 * lz;
+  const word = bitIdx < 32 ? node.lo : node.hi;
+  return ((word >>> (bitIdx & 31)) & 1) !== 0;
+}
+
+function setVoxel(holder, treeDepth, vx, vy, vz, solid) {
+  const bx = vx >> 2, by = vy >> 2, bz = vz >> 2;
+  const lx = vx & 3, ly = vy & 3, lz = vz & 3;
+  const bitIdx = lx + 4 * ly + 16 * lz;
+  function go(node, depth) {
+    if (depth === treeDepth) {
+      let lo, hi;
+      if (node === null) { lo = 0; hi = 0; }
+      else if (node.t === SOLID) { lo = 0xFFFFFFFF >>> 0; hi = 0xFFFFFFFF >>> 0; }
+      else { lo = node.lo; hi = node.hi; }
+      if (bitIdx < 32) { lo = solid ? (lo | (1 << bitIdx)) >>> 0 : (lo & ~(1 << bitIdx)) >>> 0; }
+      else { const b = bitIdx - 32; hi = solid ? (hi | (1 << b)) >>> 0 : (hi & ~(1 << b)) >>> 0; }
+      if (lo === 0 && hi === 0) return null;
+      if (lo === 0xFFFFFFFF && hi === 0xFFFFFFFF) return { t: SOLID };
+      return { t: LEAF, lo, hi };
+    }
+    const bit = treeDepth - 1 - depth;
+    const oct = ((bx >> bit) & 1) | (((by >> bit) & 1) << 1) | (((bz >> bit) & 1) << 2);
+    let children;
+    if (node === null) children = new Array(8).fill(null);
+    else if (node.t === SOLID) { children = new Array(8); for (let i = 0; i < 8; i++) children[i] = { t: SOLID }; }
+    else children = node.c.slice();
+    children[oct] = go(children[oct], depth + 1);
+    let anyPresent = false, allSolid = true;
+    for (let i = 0; i < 8; i++) { if (children[i] !== null) anyPresent = true; if (children[i] === null || children[i].t !== SOLID) allSolid = false; }
+    if (!anyPresent) return null;
+    if (allSolid) return { t: SOLID };
+    return { t: INTERIOR, c: children };
+  }
+  holder.root = go(holder.root, 0);
+}
+
+/* ======================================================================
+   PART 2 — minimal ZIP writer (store method, no compression) so both
+   output files can go through the `downloads` capability, whose
+   extension allowlist doesn't include .bin (it does include .zip).
+   ====================================================================== */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function makeZip(files) { // files: [{name, data:Uint8Array}]
+  const chunks = []; const central = [];
+  let offset = 0;
+  const enc = new TextEncoder();
+  for (const f of files) {
+    const nameBytes = enc.encode(f.name);
+    const crc = crc32(f.data);
+    const size = f.data.length;
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true); local.setUint16(6, 0, true); local.setUint16(8, 0, true);
+    local.setUint16(10, 0, true); local.setUint16(12, 0, true);
+    local.setUint32(14, crc, true); local.setUint32(18, size, true); local.setUint32(22, size, true);
+    local.setUint16(26, nameBytes.length, true); local.setUint16(28, 0, true);
+    chunks.push(new Uint8Array(local.buffer), nameBytes, f.data);
+    const cdh = new DataView(new ArrayBuffer(46));
+    cdh.setUint32(0, 0x02014b50, true);
+    cdh.setUint16(4, 20, true); cdh.setUint16(6, 20, true);
+    cdh.setUint16(8, 0, true); cdh.setUint16(10, 0, true);
+    cdh.setUint16(12, 0, true); cdh.setUint16(14, 0, true);
+    cdh.setUint32(16, crc, true); cdh.setUint32(20, size, true); cdh.setUint32(24, size, true);
+    cdh.setUint16(28, nameBytes.length, true); cdh.setUint16(30, 0, true); cdh.setUint16(32, 0, true);
+    cdh.setUint16(34, 0, true); cdh.setUint16(36, 0, true); cdh.setUint32(38, 0, true);
+    cdh.setUint32(42, offset, true);
+    central.push(new Uint8Array(cdh.buffer), nameBytes);
+    offset += 30 + nameBytes.length + size;
+  }
+  const centralStart = offset;
+  let centralSize = 0;
+  for (const c of central) centralSize += c.length;
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, files.length, true); eocd.setUint16(10, files.length, true);
+  eocd.setUint32(12, centralSize, true); eocd.setUint32(16, centralStart, true);
+  const all = chunks.concat(central, [new Uint8Array(eocd.buffer)]);
+  let total = 0; for (const a of all) total += a.length;
+  const out = new Uint8Array(total); let p = 0;
+  for (const a of all) { out.set(a, p); p += a.length; }
+  return out;
+}
+
+/* ======================================================================
+   PART 3 — application state + file loading
+   ====================================================================== */
+const state = {
+  meta: null, treeDepth: 0, leafSize: 4,
+  holder: { root: null },
+  undoStack: [], redoStack: [],
+  maxVX: 0, maxVY: 0, maxVZ: 0, // grid extents in voxels (populated region)
+  heightMap: null, // Int16Array[nbx*nbz], topmost solid voxel-Y per XZ block column (-1 = none)
+  nbx: 0, nbz: 0,
+  focus: new THREE.Vector3(),
+  loaded: false,
+  tool: 'add', brushWidth: 8, brushHeight: 8, brushShape: 'sphere',
+  lastMinimapClick: null, // {vx,vz} in voxel coords
+  flattenMode: 'box', // 'box' | 'polygon'
+  flattenBox: null, // {x0,z0,x1,z1} in voxel coords
+  flattenGradient: false, // when true, flatten interpolates a height per corner/vertex instead of one flat target
+  polygon: [], // [{vx,vz,h}, ...] in voxel coords + world-Y height (gradient mode), box-mode unused
+  polygonHover: null, // {vx,vz} live cursor position while drawing
+  polygonFinished: false,
+  heightClip: null, // world Y; null/undefined until loaded = no clip
+  mmView: null, // {x0,z0,x1,z1} in voxel coords — current minimap zoom/pan window
+  overviewMode: false,
+};
+
+function inBounds(vx, vy, vz) {
+  return vx >= 0 && vy >= 0 && vz >= 0 && vx < state.maxVX && vy < state.maxVY && vz < state.maxVZ;
+}
+function getV(vx, vy, vz) {
+  if (!inBounds(vx, vy, vz)) return false;
+  return getVoxel(state.holder.root, state.treeDepth, vx, vy, vz);
+}
+function setV(vx, vy, vz, solid) {
+  if (!inBounds(vx, vy, vz)) return;
+  setVoxel(state.holder, state.treeDepth, vx, vy, vz, solid);
+}
+
+function voxelToWorld(vx, vy, vz) {
+  const gb = state.meta.gridBounds, r = state.meta.voxelResolution;
+  return new THREE.Vector3(gb.min[0] + (vx + 0.5) * r, gb.min[1] + (vy + 0.5) * r, gb.min[2] + (vz + 0.5) * r);
+}
+function worldToVoxel(x, y, z) {
+  const gb = state.meta.gridBounds, r = state.meta.voxelResolution;
+  return [Math.floor((x - gb.min[0]) / r), Math.floor((y - gb.min[1]) / r), Math.floor((z - gb.min[2]) / r)];
+}
+
+function computeHeightMap() {
+  // Traverse the tree once, accumulating the topmost solid voxel-Y per (bx,bz) leaf-block column,
+  // respecting the current height clip (columns/voxels above it are treated as not present).
+  const treeDepth = state.treeDepth, leafSize = state.leafSize;
+  const nbx = state.nbx, nbz = state.nbz;
+  const hmax = new Int16Array(nbx * nbz).fill(-1);
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const clip = state.heightClip;
+  const clipVY = (clip !== null && clip !== undefined) ? Math.floor((clip - gb.min[1]) / res) : Infinity;
+
+  function walk(node, depth, bx0, by0, bz0) {
+    if (node === null) return;
+    if (by0 * leafSize > clipVY) return; // this whole subtree starts above the clip — skip it entirely
+    const sideBlocks = 1 << (treeDepth - depth);
+    if (node.t === INTERIOR) {
+      const half = sideBlocks >> 1;
+      for (let oct = 0; oct < 8; oct++) {
+        const c = node.c[oct]; if (!c) continue;
+        const xb = oct & 1, yb = (oct >> 1) & 1, zb = (oct >> 2) & 1;
+        walk(c, depth + 1, bx0 + xb * half, by0 + yb * half, bz0 + zb * half);
+      }
+      return;
+    }
+    if (bx0 >= nbx || bz0 >= nbz) return; // outside populated region, ignore
+    if (node.t === SOLID) {
+      const natTop = (by0 + sideBlocks) * leafSize - 1;
+      const topVY = Math.min(natTop, clipVY);
+      const x1 = Math.min(nbx, bx0 + sideBlocks), z1 = Math.min(nbz, bz0 + sideBlocks);
+      for (let bx = bx0; bx < x1; bx++) for (let bz = bz0; bz < z1; bz++) {
+        const idx = bx * nbz + bz;
+        if (topVY > hmax[idx]) hmax[idx] = topVY;
+      }
+    } else { // mixed leaf, sideBlocks===1: scan ly from high to low (true Y priority) for the topmost set voxel
+      let best = -1;
+      for (let ly = 3; ly >= 0 && best < 0; ly--) {
+        const vy = by0 * leafSize + ly;
+        if (vy > clipVY) continue;
+        for (let lz = 0; lz < 4 && best < 0; lz++) {
+          for (let lx = 0; lx < 4; lx++) {
+            const bit = lx + 4 * ly + 16 * lz;
+            const word = bit < 32 ? node.lo : node.hi;
+            if ((word >>> (bit & 31)) & 1) { best = vy; break; }
+          }
+        }
+      }
+      if (best >= 0) {
+        const idx = bx0 * nbz + bz0;
+        if (best > hmax[idx]) hmax[idx] = best;
+      }
+    }
+  }
+  walk(state.holder.root, 0, 0, 0, 0);
+  state.heightMap = hmax;
+}
+
+function selfCheck(nodesU32, leafDataU32) {
+  const enc = encodeTree(state.holder.root);
+  const solidOrig = state.meta.nodeCount - state.meta.numInteriorNodes - state.meta.numMixedLeaves;
+  const solidNew = enc.nodes.length - enc.numInteriorNodes - enc.numMixedLeaves;
+  const ok = enc.nodes.length === state.meta.nodeCount &&
+    enc.numInteriorNodes === state.meta.numInteriorNodes &&
+    enc.numMixedLeaves === state.meta.numMixedLeaves &&
+    enc.leafData.length === state.meta.leafDataCount;
+  const el = document.getElementById('checkResult');
+  document.getElementById('checkSection').style.display = 'flex';
+  if (ok) {
+    el.innerHTML = '<span class="flag ok">parsed OK</span><br>' +
+      enc.nodes.length.toLocaleString() + ' nodes · ' + enc.numMixedLeaves.toLocaleString() +
+      ' mixed leaves · ' + solidNew.toLocaleString() + ' solid-block leaves.';
+  } else {
+    el.innerHTML = '<span class="flag bad">stats mismatch</span><br>expected ' +
+      state.meta.nodeCount + ' nodes, got ' + enc.nodes.length + '. Editing may still work, but double-check exports.';
+  }
+}
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  const jsonFile = files.find(f => f.name.endsWith('.json'));
+  const binFile = files.find(f => f.name.endsWith('.bin'));
+  if (!jsonFile || !binFile) {
+    document.getElementById('fileInfo').textContent = 'Please select both the .voxel.json and .voxel.bin files together.';
+    return;
+  }
+  document.getElementById('status').textContent = 'loading…';
+  const jsonText = await jsonFile.text();
+  const meta = JSON.parse(jsonText);
+  const buf = await binFile.arrayBuffer();
+  const all = new Uint32Array(buf);
+  const nodesU32 = all.subarray(0, meta.nodeCount);
+  const leafDataU32 = all.subarray(meta.nodeCount, meta.nodeCount + meta.leafDataCount);
+
+  state.meta = meta;
+  state.treeDepth = meta.treeDepth;
+  state.leafSize = meta.leafSize;
+  state.holder.root = decodeTree(nodesU32, leafDataU32, meta.treeDepth);
+  state.undoStack = []; state.redoStack = [];
+  disposeOverview();
+  state.overviewMode = false;
+  if (document.getElementById('toggleOverview')) {
+    document.getElementById('toggleOverview').classList.remove('active');
+    document.getElementById('toggleOverview').textContent = 'Show entire model';
+    document.getElementById('overviewHint').style.display = 'none';
+    document.getElementById('renderRadius').disabled = false;
+  }
+  chunkGroup.visible = true;
+
+  const gb = meta.gridBounds, res = meta.voxelResolution;
+  state.nbx = Math.round((gb.max[0] - gb.min[0]) / (4 * res));
+  state.nby = Math.round((gb.max[1] - gb.min[1]) / (4 * res));
+  state.nbz = Math.round((gb.max[2] - gb.min[2]) / (4 * res));
+  state.maxVX = state.nbx * state.leafSize;
+  state.maxVY = state.nby * state.leafSize;
+  state.maxVZ = state.nbz * state.leafSize;
+  state.loaded = true;
+
+  document.getElementById('fileInfo').innerHTML =
+    '<b>' + jsonFile.name.replace('.voxel.json','').replace('.json','') + '</b><br>' +
+    state.maxVX + ' × ' + state.maxVY + ' × ' + state.maxVZ + ' voxels · res ' + res + 'm';
+  document.getElementById('status').textContent = jsonFile.name;
+  document.getElementById('exportBtn').disabled = false;
+  document.getElementById('toolsSection').style.display = 'flex';
+  document.getElementById('navSection').style.display = 'flex';
+  document.getElementById('editSection').style.display = 'flex';
+  document.getElementById('flattenSection').style.display = 'flex';
+  document.getElementById('clipSection').style.display = 'flex';
+  document.getElementById('dropHint').style.display = 'none';
+
+  // height-clip slider spans the grid's world Y range; start with everything visible
+  const clipEl = document.getElementById('heightClip');
+  clipEl.min = gb.min[1]; clipEl.max = gb.max[1]; clipEl.step = res;
+  clipEl.value = gb.max[1];
+  state.heightClip = gb.max[1];
+  document.getElementById('clipLabel').textContent = 'off';
+
+  // minimap starts fully zoomed out
+  state.mmView = { x0: 0, z0: 0, x1: state.maxVX, z1: state.maxVZ };
+
+  selfCheck(nodesU32, leafDataU32);
+  computeHeightMap();
+  drawMinimap();
+
+  // place focus at center of grid, just above terrain there
+  const cbx = Math.floor(state.nbx / 2), cbz = Math.floor(state.nbz / 2);
+  const h = state.heightMap[cbx * state.nbz + cbz];
+  const focusVY = h >= 0 ? h + 8 : Math.floor(state.maxVY / 2);
+  const w = voxelToWorld(cbx * state.leafSize + 2, focusVY, cbz * state.leafSize + 2);
+  state.focus.copy(w);
+  camState.distance = Math.max(state.maxVX, state.maxVZ) * res * 0.12;
+  camState.azimuth = Math.PI * 0.25; camState.polar = 1.0;
+  markDirtyAll();
+});
+
+/* ======================================================================
+   PART 4 — three.js scene, chunked mesher, camera
+   ====================================================================== */
+const CHUNK = 16; // voxels per chunk edge
+let scene, camera, renderer, chunkGroup;
+const chunkMeshes = new Map(); // key "cx,cy,cz" -> THREE.Mesh
+let streamTimer = 0;
+
+// shared cube-face table (outward normal + CCW corner offsets on a unit [0,1]^3 box) used by
+// both the per-voxel chunk mesher and the whole-model overview mesher.
+const CUBE_FACES = [
+  { n: [1,0,0], corners: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+  { n: [-1,0,0], corners: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+  { n: [0,1,0], corners: [[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+  { n: [0,-1,0], corners: [[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
+  { n: [0,0,1], corners: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+  { n: [0,0,-1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
+];
+
+function initScene() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0c0f12);
+  camera = new THREE.PerspectiveCamera(60, 1, 0.05, 2000);
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  document.getElementById('view3d').appendChild(renderer.domElement);
+  chunkGroup = new THREE.Group();
+  scene.add(chunkGroup);
+
+  const amb = new THREE.AmbientLight(0x8090a0, 0.55);
+  scene.add(amb);
+  const sun = new THREE.DirectionalLight(0xfff4e0, 1.0);
+  sun.position.set(1, 1.6, 0.6);
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x88a0c0, 0.35);
+  fill.position.set(-1, 0.5, -0.6);
+  scene.add(fill);
+
+  resize();
+  window.addEventListener('resize', resize);
+  requestAnimationFrame(loop);
+}
+function resize() {
+  const el = document.getElementById('main');
+  const w = el.clientWidth, h = el.clientHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+
+function heightColor(y) {
+  // gradient: low = slate rock, mid = moss, high = pale stone — normalized against the
+  // grid's own Y extent, clamped to the current height clip so the palette isn't wasted
+  // on a range that's hidden anyway.
+  const gb = state.meta.gridBounds;
+  const lo = gb.min[1];
+  const hi = (state.heightClip !== null && state.heightClip !== undefined) ? state.heightClip : gb.max[1];
+  const t = THREE.MathUtils.clamp((y - lo) / Math.max(1e-6, hi - lo), 0, 1);
+  const c1 = new THREE.Color(0x5b5145), c2 = new THREE.Color(0x5a7a4c), c3 = new THREE.Color(0xcdd3d6);
+  if (t < 0.5) return c1.clone().lerp(c2, t / 0.5);
+  return c2.clone().lerp(c3, (t - 0.5) / 0.5);
+}
+
+function chunkKey(cx, cy, cz) { return cx + ',' + cy + ',' + cz; }
+
+function buildChunk(cx, cy, cz) {
+  const key = chunkKey(cx, cy, cz);
+  const old = chunkMeshes.get(key);
+  if (old) { chunkGroup.remove(old); old.geometry.dispose(); chunkMeshes.delete(key); }
+
+  const x0 = cx * CHUNK, y0 = cy * CHUNK, z0 = cz * CHUNK;
+  if (x0 >= state.maxVX || y0 >= state.maxVY || z0 >= state.maxVZ) return;
+  if (x0 + CHUNK <= 0 || y0 + CHUNK <= 0 || z0 + CHUNK <= 0) return;
+
+  const gb0 = state.meta.gridBounds, res0 = state.meta.voxelResolution;
+  const clip = state.heightClip;
+  if (clip !== null && clip !== undefined && gb0.min[1] + (y0 - 1) * res0 > clip) return; // whole chunk clipped away
+
+  const P = CHUNK + 2;
+  const solid = new Uint8Array(P * P * P);
+  let any = false;
+  for (let lx = 0; lx < P; lx++) for (let ly = 0; ly < P; ly++) for (let lz = 0; lz < P; lz++) {
+    const vy = y0 + ly - 1;
+    if (clip !== null && clip !== undefined && gb0.min[1] + vy * res0 > clip) continue; // above the height clip: treat as empty for rendering
+    const v = getV(x0 + lx - 1, vy, z0 + lz - 1);
+    if (v) { solid[lx + ly * P + lz * P * P] = 1; any = true; }
+  }
+  if (!any) return;
+
+  const res = state.meta.voxelResolution;
+  const pos = [], nrm = [], col = [];
+  function idx(lx, ly, lz) { return lx + ly * P + lz * P * P; }
+  const faces = CUBE_FACES;
+  for (let lx = 1; lx <= CHUNK; lx++) for (let ly = 1; ly <= CHUNK; ly++) for (let lz = 1; lz <= CHUNK; lz++) {
+    if (!solid[idx(lx, ly, lz)]) continue;
+    const vx = x0 + lx - 1, vy = y0 + ly - 1, vz = z0 + lz - 1;
+    if (vx >= state.maxVX || vy >= state.maxVY || vz >= state.maxVZ) continue;
+    const c = heightColor(state.meta.gridBounds.min[1] + vy * res);
+    for (const f of faces) {
+      const nx = lx + f.n[0], ny = ly + f.n[1], nz = lz + f.n[2];
+      if (solid[idx(nx, ny, nz)]) continue; // hidden face
+      const base = [vx, vy, vz];
+      const quad = f.corners.map(o => [base[0]+o[0], base[1]+o[1], base[2]+o[2]]);
+      // two triangles
+      const tri = [quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]];
+      for (const p of tri) {
+        const wx = state.meta.gridBounds.min[0] + p[0]*res;
+        const wy = state.meta.gridBounds.min[1] + p[1]*res;
+        const wz = state.meta.gridBounds.min[2] + p[2]*res;
+        pos.push(wx, wy, wz);
+        nrm.push(f.n[0], f.n[1], f.n[2]);
+        col.push(c.r, c.g, c.b);
+      }
+    }
+  }
+  if (pos.length === 0) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData.chunk = [cx, cy, cz];
+  chunkGroup.add(mesh);
+  chunkMeshes.set(key, mesh);
+}
+
+/* ---- whole-model overview: one unculled box per leaf/solid octree node, at its true size.
+   This is a low-detail stand-in for the full scene (a mixed leaf renders as one solid 4x4x4
+   block, losing its internal mask), built directly from the tree's own compression — a fully
+   solid region is already stored as one big node, so it renders as one big box for free. ---- */
+let overviewMesh = null;
+function disposeOverview() {
+  if (overviewMesh) { scene.remove(overviewMesh); overviewMesh.geometry.dispose(); overviewMesh.material.dispose(); overviewMesh = null; }
+}
+function buildOverviewMesh() {
+  disposeOverview();
+  if (!state.loaded) return;
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const treeDepth = state.treeDepth, leafSize = state.leafSize;
+  const clip = state.heightClip;
+  const clipVY = (clip !== null && clip !== undefined) ? Math.floor((clip - gb.min[1]) / res) : Infinity;
+  const pos = [], nrm = [], col = [];
+  function emitBox(bx0, by0, bz0, sizeVoxXZ, hVoxY) {
+    const wx = gb.min[0] + bx0 * leafSize * res;
+    const wy = gb.min[1] + by0 * leafSize * res;
+    const wz = gb.min[2] + bz0 * leafSize * res;
+    const sx = sizeVoxXZ * res, sy = hVoxY * res, sz = sizeVoxXZ * res;
+    const c = heightColor(wy + sy * 0.5);
+    for (const f of CUBE_FACES) {
+      const quad = f.corners.map(o => [wx + o[0]*sx, wy + o[1]*sy, wz + o[2]*sz]);
+      const tri = [quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]];
+      for (const p of tri) { pos.push(p[0], p[1], p[2]); nrm.push(f.n[0], f.n[1], f.n[2]); col.push(c.r, c.g, c.b); }
+    }
+  }
+  function walk(node, depth, bx0, by0, bz0) {
+    if (node === null) return;
+    if (by0 * leafSize > clipVY) return;
+    const sideBlocks = 1 << (treeDepth - depth);
+    if (node.t === INTERIOR) {
+      const half = sideBlocks >> 1;
+      for (let oct = 0; oct < 8; oct++) {
+        const c = node.c[oct]; if (!c) continue;
+        const xb = oct & 1, yb = (oct >> 1) & 1, zb = (oct >> 2) & 1;
+        walk(c, depth + 1, bx0 + xb * half, by0 + yb * half, bz0 + zb * half);
+      }
+      return;
+    }
+    const sizeVox = sideBlocks * leafSize;
+    let hVox = sizeVox;
+    if (clipVY !== Infinity) { hVox = Math.min(sizeVox, clipVY + 1 - by0 * leafSize); if (hVox <= 0) return; }
+    emitBox(bx0, by0, bz0, sizeVox, hVox);
+  }
+  walk(state.holder.root, 0, 0, 0, 0);
+  if (pos.length === 0) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  overviewMesh = new THREE.Mesh(geo, mat);
+  scene.add(overviewMesh);
+}
+function frameWholeModel() {
+  const gb = state.meta.gridBounds;
+  state.focus.set((gb.min[0]+gb.max[0])/2, (gb.min[1]+gb.max[1])/2, (gb.min[2]+gb.max[2])/2);
+  const spanX = gb.max[0]-gb.min[0], spanY = gb.max[1]-gb.min[1], spanZ = gb.max[2]-gb.min[2];
+  const radius = 0.5 * Math.sqrt(spanX*spanX + spanY*spanY + spanZ*spanZ);
+  camState.distance = radius / Math.sin((camera.fov * Math.PI/180) / 2) * 1.05;
+}
+function setOverviewMode(on) {
+  state.overviewMode = on;
+  document.getElementById('toggleOverview').classList.toggle('active', on);
+  document.getElementById('toggleOverview').textContent = on ? 'Show detail area' : 'Show entire model';
+  document.getElementById('overviewHint').style.display = on ? 'block' : 'none';
+  document.getElementById('renderRadius').disabled = on;
+  if (!on) {
+    if (overviewMesh) overviewMesh.visible = false;
+    chunkGroup.visible = true;
+    streamChunks();
+    return;
+  }
+  if (overviewMesh) {
+    chunkGroup.visible = false;
+    overviewMesh.visible = true;
+    frameWholeModel();
+    return;
+  }
+  // first time (or after an edit invalidated it): building can take a moment on a large scene
+  showProgress('Building whole-model view…');
+  setTimeout(() => {
+    buildOverviewMesh();
+    hideProgress();
+    chunkGroup.visible = false;
+    if (overviewMesh) overviewMesh.visible = true;
+    frameWholeModel();
+  }, 20);
+}
+
+let dirtyChunks = new Set();
+function markDirty(cx, cy, cz) { dirtyChunks.add(chunkKey(cx, cy, cz) + '|' + cx + '|' + cy + '|' + cz); }
+function markDirtyBox(vx0, vy0, vz0, vx1, vy1, vz1) {
+  const c0x = Math.floor(vx0 / CHUNK) - 1, c1x = Math.floor(vx1 / CHUNK) + 1;
+  const c0y = Math.floor(vy0 / CHUNK) - 1, c1y = Math.floor(vy1 / CHUNK) + 1;
+  const c0z = Math.floor(vz0 / CHUNK) - 1, c1z = Math.floor(vz1 / CHUNK) + 1;
+  for (let cx = c0x; cx <= c1x; cx++) for (let cy = c0y; cy <= c1y; cy++) for (let cz = c0z; cz <= c1z; cz++) markDirty(cx, cy, cz);
+}
+function markDirtyAll() {
+  for (const key of chunkMeshes.keys()) { const m = chunkMeshes.get(key); chunkGroup.remove(m); m.geometry.dispose(); }
+  chunkMeshes.clear();
+  disposeOverview(); // data or clip changed — the cached whole-model mesh is stale
+  if (state.overviewMode) buildOverviewMesh();
+  else streamChunks(true);
+}
+function flushDirty() {
+  if (dirtyChunks.size === 0) return;
+  for (const tag of dirtyChunks) {
+    const [, cx, cy, cz] = tag.split('|');
+    buildChunk(parseInt(cx), parseInt(cy), parseInt(cz));
+  }
+  dirtyChunks.clear();
+}
+
+function streamChunks(force) {
+  if (!state.loaded) return;
+  const r = parseInt(document.getElementById('renderRadius').value);
+  const res = state.meta.voxelResolution, gb = state.meta.gridBounds;
+  const [fvx, fvy, fvz] = worldToVoxel(state.focus.x, state.focus.y, state.focus.z);
+  const fcx = Math.floor(fvx / CHUNK), fcy = Math.floor(fvy / CHUNK), fcz = Math.floor(fvz / CHUNK);
+  const wanted = new Set();
+  for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
+    if (dx*dx+dy*dy+dz*dz > r*r+1) continue;
+    const cx = fcx+dx, cy = fcy+dy, cz = fcz+dz;
+    const key = chunkKey(cx,cy,cz);
+    wanted.add(key);
+    if (!chunkMeshes.has(key)) buildChunk(cx, cy, cz);
+  }
+  for (const key of Array.from(chunkMeshes.keys())) {
+    if (!wanted.has(key)) { const m = chunkMeshes.get(key); chunkGroup.remove(m); m.geometry.dispose(); chunkMeshes.delete(key); }
+  }
+}
+
+/* ---- camera controls: drag orbit, wheel zoom, WASD move focus ---- */
+const camState = { azimuth: 0.9, polar: 1.0, distance: 20 };
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Digit1') selectTool('add');
+  if (e.code === 'Digit2') selectTool('remove');
+  if (e.code === 'Digit3') selectTool('flatten');
+  if (e.code === 'Digit4') selectTool('orbit');
+  if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') { e.preventDefault(); if (e.shiftKey) doRedo(); else doUndo(); }
+  if ((e.metaKey || e.ctrlKey) && e.code === 'KeyY') { e.preventDefault(); doRedo(); }
+});
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+function updateCameraFromState() {
+  const p = camState;
+  const x = state.focus.x + p.distance * Math.sin(p.polar) * Math.sin(p.azimuth);
+  const y = state.focus.y + p.distance * Math.cos(p.polar);
+  const z = state.focus.z + p.distance * Math.sin(p.polar) * Math.cos(p.azimuth);
+  camera.position.set(x, y, z);
+  camera.lookAt(state.focus);
+}
+
+let dragging = false, dragButton = -1, lastX = 0, lastY = 0;
+const dom = () => renderer.domElement;
+document.addEventListener('DOMContentLoaded', () => {}); // noop, init happens below
+
+function setupPointerHandlers() {
+  const el = renderer.domElement;
+  el.addEventListener('pointerdown', (e) => {
+    if (!state.loaded) return;
+    if (e.button === 2 || state.tool === 'orbit') { dragging = true; dragButton = e.button; lastX = e.clientX; lastY = e.clientY; el.setPointerCapture(e.pointerId); return; }
+    if (state.tool === 'add' || state.tool === 'remove') {
+      strokeStart();
+      paintAt(e.clientX, e.clientY);
+      dragging = true; dragButton = e.button; el.setPointerCapture(e.pointerId);
+    }
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    if (dragButton === 2 || state.tool === 'orbit') {
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      camState.azimuth -= dx * 0.006;
+      camState.polar = THREE.MathUtils.clamp(camState.polar - dy * 0.006, 0.15, Math.PI - 0.15);
+      lastX = e.clientX; lastY = e.clientY;
+    } else if (state.tool === 'add' || state.tool === 'remove') {
+      paintAt(e.clientX, e.clientY);
+    }
+  });
+  window.addEventListener('pointerup', (e) => {
+    if (dragging && (state.tool === 'add' || state.tool === 'remove')) strokeEnd();
+    dragging = false; dragButton = -1;
+  });
+  el.addEventListener('contextmenu', e => e.preventDefault());
+  el.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    camState.distance = THREE.MathUtils.clamp(camState.distance * (1 + Math.sign(e.deltaY) * 0.12), 1, 800);
+  }, { passive: false });
+}
+
+const raycaster = new THREE.Raycaster();
+function paintAt(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const mouse = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera);
+  if (state.overviewMode) {
+    // the overview is a coarse stand-in (one box per leaf node), not precise enough to edit —
+    // clicking it instead jumps the focus there and switches to the detailed, editable view.
+    if (!overviewMesh) return;
+    const hits = raycaster.intersectObject(overviewMesh, false);
+    if (hits.length === 0) return;
+    state.focus.copy(hits[0].point);
+    setOverviewMode(false);
+    return;
+  }
+  const hits = raycaster.intersectObjects(chunkGroup.children, false);
+  if (hits.length === 0) return;
+  const hit = hits[0];
+  const res = state.meta.voxelResolution;
+  const eps = res * 0.5;
+  const dir = state.tool === 'add' ? 1 : -1; // add: offset into the empty space just outside the surface (+normal); remove: offset into the solid just inside it (-normal)
+  const p = hit.point.clone().addScaledVector(hit.face.normal, dir * eps);
+  const [vx, vy, vz] = worldToVoxel(p.x, p.y, p.z);
+  applyBrush(vx, vy, vz, state.tool === 'add');
+}
+
+function applyBrush(cx, cy, cz, solid) {
+  // width/height are DIAMETERS in voxels (not radii), so a value of 1 selects exactly one voxel.
+  const W = state.brushWidth, H = state.brushHeight;
+  const wLo = Math.floor((W - 1) / 2), wHi = Math.ceil((W - 1) / 2);
+  const hLo = Math.floor((H - 1) / 2), hHi = Math.ceil((H - 1) / 2);
+  const shape = state.brushShape;
+  const x0 = Math.max(0, cx - wLo), x1 = Math.min(state.maxVX - 1, cx + wHi);
+  const y0 = Math.max(0, cy - hLo), y1 = Math.min(state.maxVY - 1, cy + hHi);
+  const z0 = Math.max(0, cz - wLo), z1 = Math.min(state.maxVZ - 1, cz + wHi);
+  const rx = W / 2, ry = H / 2, rz = W / 2; // ellipsoid semi-axes (in voxels) for the sphere shape
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) {
+    if (shape === 'sphere') {
+      const dx = (x - cx) / rx, dy = (y - cy) / ry, dz = (z - cz) / rz;
+      if (dx*dx+dy*dy+dz*dz > 1) continue;
+    }
+    setV(x, y, z, solid);
+  }
+  markDirtyBox(x0, y0, z0, x1, y1, z1);
+  pendingFlush = true;
+}
+let pendingFlush = false;
+let strokeSnapshot = null;
+function strokeStart() { strokeSnapshot = state.holder.root; }
+function strokeEnd() {
+  if (strokeSnapshot !== state.holder.root) {
+    state.undoStack.push(strokeSnapshot);
+    state.redoStack = [];
+    updateEditCount();
+  }
+  strokeSnapshot = null;
+  computeHeightMap(); drawMinimap();
+  if (state.overviewMode) buildOverviewMesh(); // the coarse whole-model mesh is a separate cache — edits don't touch it otherwise
+}
+function doUndo() {
+  if (state.undoStack.length === 0) return;
+  state.redoStack.push(state.holder.root);
+  state.holder.root = state.undoStack.pop();
+  markDirtyAll(); computeHeightMap(); drawMinimap(); updateEditCount();
+}
+function doRedo() {
+  if (state.redoStack.length === 0) return;
+  state.undoStack.push(state.holder.root);
+  state.holder.root = state.redoStack.pop();
+  markDirtyAll(); computeHeightMap(); drawMinimap(); updateEditCount();
+}
+function updateEditCount() {
+  document.getElementById('editCount').textContent = state.undoStack.length + ' edit(s) on undo stack';
+}
+document.getElementById('undoBtn').addEventListener('click', doUndo);
+document.getElementById('redoBtn').addEventListener('click', doRedo);
+
+/* ---- flatten tool (box or freehand polygon area) ---- */
+// even-odd point-in-polygon test; poly = [{vx,vz}, ...], point tested at (px,pz)
+function pointInPolygon(px, pz, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].vx, zi = poly[i].vz, xj = poly[j].vx, zj = poly[j].vz;
+    const intersect = ((zi > pz) !== (zj > pz)) && (px < (xj - xi) * (pz - zi) / (zj - zi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function flattenAreaBounds() {
+  if (state.flattenMode === 'box') {
+    if (!state.flattenBox) return null;
+    const b = state.flattenBox;
+    return { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1 };
+  }
+  if (state.polygon.length < 3) return null;
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const p of state.polygon) { x0 = Math.min(x0, p.vx); x1 = Math.max(x1, p.vx); z0 = Math.min(z0, p.vz); z1 = Math.max(z1, p.vz); }
+  return { x0: Math.floor(x0), z0: Math.floor(z0), x1: Math.ceil(x1), z1: Math.ceil(z1) };
+}
+// world-Y height of the terrain surface at voxel column (vx,vz), or null if outside/empty
+function sampleHeightWorldY(vx, vz) {
+  const bx = Math.floor(vx / state.leafSize), bz = Math.floor(vz / state.leafSize);
+  if (bx < 0 || bz < 0 || bx >= state.nbx || bz >= state.nbz) return null;
+  const h = state.heightMap[bx * state.nbz + bz];
+  if (h < 0) return null;
+  return state.meta.gridBounds.min[1] + (h + 1) * state.meta.voxelResolution;
+}
+// bilinear interpolation of the four box-corner heights (voxel-Y units) at point (px,pz)
+function bilinearHeight(px, pz, c) {
+  const w = c.x1 - c.x0, d = c.z1 - c.z0;
+  const u = w > 0 ? Math.min(1, Math.max(0, (px - c.x0) / w)) : 0;
+  const v = d > 0 ? Math.min(1, Math.max(0, (pz - c.z0) / d)) : 0;
+  const top = c.h00 * (1 - u) + c.h10 * u;
+  const bot = c.h01 * (1 - u) + c.h11 * u;
+  return top * (1 - v) + bot * v;
+}
+// inverse-distance-weighted height (voxel-Y units) at (px,pz) from polygon vertex heights
+function idwHeight(px, pz, pts) {
+  let wsum = 0, hsum = 0;
+  for (const p of pts) {
+    const dx = px - p.vx, dz = pz - p.vz;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < 1e-6) return p.hv;
+    const w = 1 / d2;
+    wsum += w; hsum += w * p.hv;
+  }
+  return hsum / wsum;
+}
+async function applyFlatten() {
+  const bounds = flattenAreaBounds();
+  if (!bounds) { alert(state.flattenMode === 'box' ? 'Drag a box on the minimap first.' : 'Draw and finish a polygon on the minimap first.'); return; }
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const usePolygon = state.flattenMode === 'polygon';
+  const poly = state.polygon;
+  const gradient = state.flattenGradient;
+  const toVY = (worldY) => (worldY - gb.min[1]) / res;
+
+  let targetVY = null, cornerVY = null, polyPts = null;
+  if (!gradient) {
+    const targetWorldY = parseFloat(document.getElementById('flattenY').value);
+    if (isNaN(targetWorldY)) { alert('Set a target Y first.'); return; }
+    targetVY = Math.round(toVY(targetWorldY));
+  } else if (!usePolygon) {
+    const b = state.flattenBox;
+    const h00 = parseFloat(document.getElementById('cornerH00').value);
+    const h10 = parseFloat(document.getElementById('cornerH10').value);
+    const h01 = parseFloat(document.getElementById('cornerH01').value);
+    const h11 = parseFloat(document.getElementById('cornerH11').value);
+    if ([h00, h10, h01, h11].some(isNaN)) { alert('Set all four corner heights first (or Resample from terrain).'); return; }
+    cornerVY = { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1, h00: toVY(h00), h10: toVY(h10), h01: toVY(h01), h11: toVY(h11) };
+  } else {
+    if (poly.length < 3) { alert('Draw and finish a polygon first.'); return; }
+    if (poly.some(p => p.h == null || isNaN(p.h))) { alert('Set a height for every point first (or Resample from terrain).'); return; }
+    polyPts = poly.map(p => ({ vx: p.vx, vz: p.vz, hv: toVY(p.h) }));
+  }
+
+  const x0 = Math.max(0, bounds.x0), x1 = Math.min(state.maxVX - 1, bounds.x1);
+  const z0 = Math.max(0, bounds.z0), z1 = Math.min(state.maxVZ - 1, bounds.z1);
+  strokeStart();
+  const total = Math.max(1, (x1 - x0 + 1) * (z1 - z0 + 1));
+  showProgress('Flattening…');
+  let done = 0;
+  const BATCH = 300;
+  for (let x = x0; x <= x1; x++) {
+    for (let z = z0; z <= z1; z++) {
+      if (!usePolygon || pointInPolygon(x + 0.5, z + 0.5, poly)) {
+        let colVY;
+        if (!gradient) colVY = targetVY;
+        else if (cornerVY) colVY = Math.round(bilinearHeight(x + 0.5, z + 0.5, cornerVY));
+        else colVY = Math.round(idwHeight(x + 0.5, z + 0.5, polyPts));
+        for (let y = 0; y < state.maxVY; y++) setV(x, y, z, y < colVY);
+      }
+      done++;
+      if (done % BATCH === 0) { setProgress(done / total); await nextTick(); }
+    }
+  }
+  hideProgress();
+  markDirtyBox(x0, 0, z0, x1, state.maxVY - 1, z1);
+  strokeEnd();
+}
+function nextTick() { return new Promise(r => setTimeout(r, 0)); }
+function showProgress(label) { document.getElementById('progress').style.display = 'flex'; document.getElementById('progressLabel').textContent = label; setProgress(0); }
+function setProgress(f) { document.getElementById('progressBar').style.width = Math.round(f * 100) + '%'; }
+function hideProgress() { document.getElementById('progress').style.display = 'none'; }
+document.getElementById('applyFlatten').addEventListener('click', applyFlatten);
+document.getElementById('sampleHeight').addEventListener('click', () => {
+  if (!state.lastMinimapClick) return;
+  const { vx, vz } = state.lastMinimapClick;
+  const bx = Math.floor(vx / state.leafSize), bz = Math.floor(vz / state.leafSize);
+  const h = state.heightMap[bx * state.nbz + bz];
+  if (h >= 0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h + 1) * state.meta.voxelResolution).toFixed(2);
+});
+function setFlattenMode(mode) {
+  state.flattenMode = mode;
+  state.flattenBox = null; state.polygon = []; state.polygonHover = null; state.polygonFinished = false;
+  document.getElementById('flattenModeBox').classList.toggle('active', mode === 'box');
+  document.getElementById('flattenModePolygon').classList.toggle('active', mode === 'polygon');
+  document.getElementById('polygonButtons').style.display = mode === 'polygon' ? 'grid' : 'none';
+  document.getElementById('flattenHint').textContent = mode === 'box'
+    ? 'Drag a rectangle on the minimap to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.'
+    : 'Click points on the minimap to trace an outline, then "Finish shape" (or double-click). Set a target height, then Apply.';
+  updateGradientControlsVisibility();
+  renderPolygonHeightList();
+  drawMinimap();
+}
+document.getElementById('flattenModeBox').addEventListener('click', () => setFlattenMode('box'));
+document.getElementById('flattenModePolygon').addEventListener('click', () => setFlattenMode('polygon'));
+document.getElementById('finishPolygon').addEventListener('click', () => finishPolygon());
+document.getElementById('clearPolygon').addEventListener('click', () => { state.polygon = []; state.polygonHover = null; state.polygonFinished = false; renderPolygonHeightList(); drawMinimap(); });
+function finishPolygon() {
+  if (state.polygon.length < 3) return;
+  const cx = Math.floor(state.polygon.reduce((s,p)=>s+p.vx,0) / state.polygon.length / state.leafSize);
+  const cz = Math.floor(state.polygon.reduce((s,p)=>s+p.vz,0) / state.polygon.length / state.leafSize);
+  const h = cx>=0&&cz>=0&&cx<state.nbx&&cz<state.nbz ? state.heightMap[cx*state.nbz+cz] : -1;
+  if (h>=0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h+1)*state.meta.voxelResolution).toFixed(2);
+  state.polygonHover = null;
+  state.polygonFinished = true;
+  drawMinimap();
+}
+/* ---- gradient (per-corner / per-vertex height) controls for the flatten tool ---- */
+function updateGradientControlsVisibility() {
+  document.getElementById('gradientBoxControls').style.display = state.flattenMode === 'box' ? 'grid' : 'none';
+  document.getElementById('gradientPolygonControls').style.display = state.flattenMode === 'polygon' ? 'flex' : 'none';
+}
+function renderPolygonHeightList() {
+  const container = document.getElementById('gradientPolygonControls');
+  container.innerHTML = '';
+  state.polygon.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const label = document.createElement('label');
+    label.textContent = 'P' + (i + 1);
+    const input = document.createElement('input');
+    input.type = 'number'; input.step = '0.1';
+    input.value = p.h != null ? p.h.toFixed(2) : '';
+    input.addEventListener('input', () => { p.h = parseFloat(input.value); });
+    row.appendChild(label); row.appendChild(input);
+    container.appendChild(row);
+  });
+}
+function resampleGradientHeights() {
+  if (state.flattenMode === 'box') {
+    if (!state.flattenBox) return;
+    const b = state.flattenBox;
+    const corners = [['cornerH00', b.x0, b.z0], ['cornerH10', b.x1, b.z0], ['cornerH01', b.x0, b.z1], ['cornerH11', b.x1, b.z1]];
+    for (const [id, vx, vz] of corners) {
+      const h = sampleHeightWorldY(vx, vz);
+      if (h != null) document.getElementById(id).value = h.toFixed(2);
+    }
+  } else {
+    for (const p of state.polygon) { const h = sampleHeightWorldY(p.vx, p.vz); if (h != null) p.h = h; }
+    renderPolygonHeightList();
+  }
+}
+document.getElementById('resampleGradient').addEventListener('click', resampleGradientHeights);
+document.getElementById('flattenGradient').addEventListener('change', (e) => {
+  state.flattenGradient = e.target.checked;
+  document.getElementById('flattenFlatControls').style.display = state.flattenGradient ? 'none' : 'flex';
+  document.getElementById('flattenGradientControls').style.display = state.flattenGradient ? 'flex' : 'none';
+  document.getElementById('gradientHint').style.display = state.flattenGradient ? 'block' : 'none';
+  updateGradientControlsVisibility();
+  if (state.flattenGradient) resampleGradientHeights();
+  drawMinimap();
+});
+
+/* ---- minimap ---- */
+const mmCanvas = document.getElementById('minimap');
+const mmWrap = document.getElementById('minimapWrap');
+const mmCtx = mmCanvas.getContext('2d');
+let mmImageData = null;
+function drawMinimap() {
+  if (!state.heightMap || !state.mmView) return;
+  const nbx = state.nbx, nbz = state.nbz;
+  const W = mmCanvas.width, H = mmCanvas.height;
+  if (!mmImageData || mmImageData.width !== W || mmImageData.height !== H) mmImageData = mmCtx.createImageData(W, H);
+  const data = mmImageData.data;
+  const v = state.mmView;
+  const vw = v.x1 - v.x0, vh = v.z1 - v.z0;
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      const vx = v.x0 + (px / W) * vw, vz = v.z0 + (py / H) * vh;
+      const bx = Math.floor(vx / state.leafSize), bz = Math.floor(vz / state.leafSize);
+      const o = (py * W + px) * 4;
+      if (bx < 0 || bz < 0 || bx >= nbx || bz >= nbz) { data[o]=6; data[o+1]=7; data[o+2]=9; data[o+3]=255; continue; }
+      const h = state.heightMap[bx * nbz + bz];
+      if (h < 0) { data[o]=10; data[o+1]=13; data[o+2]=16; data[o+3]=255; }
+      else {
+        const c = heightColor(state.meta.gridBounds.min[1] + h * state.meta.voxelResolution);
+        data[o] = c.r*255; data[o+1] = c.g*255; data[o+2] = c.b*255; data[o+3] = 255;
+      }
+    }
+  }
+  mmCtx.putImageData(mmImageData, 0, 0);
+  // focus marker
+  const toScreen = (vx, vz) => [((vx - v.x0) / vw) * W, ((vz - v.z0) / vh) * H];
+  const [fvx, , fvz] = worldToVoxel(state.focus.x, state.focus.y, state.focus.z);
+  const [mx, my] = toScreen(fvx, fvz);
+  mmCtx.strokeStyle = '#e0a458'; mmCtx.lineWidth = 2;
+  mmCtx.beginPath(); mmCtx.arc(mx, my, 5, 0, Math.PI*2); mmCtx.stroke();
+  if (state.flattenMode === 'box' && state.flattenBox) {
+    const b = state.flattenBox;
+    const [x0, z0] = toScreen(b.x0, b.z0), [x1, z1] = toScreen(b.x1, b.z1);
+    mmCtx.strokeStyle = '#4fb8ae'; mmCtx.lineWidth = 1.5;
+    mmCtx.fillStyle = 'rgba(79,184,174,0.12)';
+    mmCtx.fillRect(Math.min(x0,x1), Math.min(z0,z1), Math.abs(x1-x0), Math.abs(z1-z0));
+    mmCtx.strokeRect(Math.min(x0,x1), Math.min(z0,z1), Math.abs(x1-x0), Math.abs(z1-z0));
+  }
+  if (state.flattenMode === 'polygon' && state.polygon.length > 0) {
+    const toPx = (p) => toScreen(p.vx, p.vz);
+    mmCtx.strokeStyle = '#4fb8ae'; mmCtx.lineWidth = 1.5;
+    mmCtx.fillStyle = 'rgba(79,184,174,0.12)';
+    mmCtx.beginPath();
+    const [sx, sy] = toPx(state.polygon[0]);
+    mmCtx.moveTo(sx, sy);
+    for (let i = 1; i < state.polygon.length; i++) { const [x,y] = toPx(state.polygon[i]); mmCtx.lineTo(x,y); }
+    if (state.polygonHover) { const [hx,hy] = toPx(state.polygonHover); mmCtx.lineTo(hx,hy); }
+    if (state.polygonFinished) mmCtx.closePath();
+    if (state.polygonFinished) mmCtx.fill();
+    mmCtx.stroke();
+    state.polygon.forEach((p, i) => {
+      const [x,y] = toPx(p);
+      mmCtx.beginPath(); mmCtx.arc(x,y,3,0,Math.PI*2); mmCtx.fillStyle='#4fb8ae'; mmCtx.fill();
+      if (state.flattenGradient) { mmCtx.fillStyle = '#dce8e6'; mmCtx.font = '10px sans-serif'; mmCtx.fillText(String(i+1), x+5, y-5); }
+    });
+  }
+}
+
+function mmVoxelFromEvent(e) {
+  const rect = mmCanvas.getBoundingClientRect();
+  const px = (e.clientX-rect.left)/rect.width, pz=(e.clientY-rect.top)/rect.height;
+  const v = state.mmView;
+  return { vx: Math.floor(v.x0 + px*(v.x1-v.x0)), vz: Math.floor(v.z0 + pz*(v.z1-v.z0)) };
+}
+mmCanvas.addEventListener('wheel', (e) => {
+  if (!state.loaded) return;
+  e.preventDefault();
+  const rect = mmCanvas.getBoundingClientRect();
+  const px = (e.clientX-rect.left)/rect.width, pz=(e.clientY-rect.top)/rect.height;
+  const v = state.mmView;
+  const underVX = v.x0 + px*(v.x1-v.x0), underVZ = v.z0 + pz*(v.z1-v.z0);
+  const factor = e.deltaY < 0 ? 0.82 : 1/0.82; // scroll up/away = zoom in
+  const MIN_SPAN = 12; // voxels — how far you can zoom in
+  let w = Math.min(state.maxVX, Math.max(MIN_SPAN, (v.x1-v.x0) * factor));
+  let h = Math.min(state.maxVZ, Math.max(MIN_SPAN, (v.z1-v.z0) * factor));
+  let x0 = underVX - px*w, z0 = underVZ - pz*h;
+  let x1 = x0 + w, z1 = z0 + h;
+  if (x0 < 0) { x1 -= x0; x0 = 0; }
+  if (z0 < 0) { z1 -= z0; z0 = 0; }
+  if (x1 > state.maxVX) { x0 -= (x1 - state.maxVX); x1 = state.maxVX; }
+  if (z1 > state.maxVZ) { z0 -= (z1 - state.maxVZ); z1 = state.maxVZ; }
+  state.mmView = { x0: Math.max(0,x0), z0: Math.max(0,z0), x1: Math.min(state.maxVX,x1), z1: Math.min(state.maxVZ,z1) };
+  drawMinimap();
+}, { passive: false });
+let mmDragStart = null;
+mmCanvas.addEventListener('pointerdown', (e) => {
+  if (!state.loaded) return;
+  const { vx, vz } = mmVoxelFromEvent(e);
+  state.lastMinimapClick = { vx, vz };
+  if (state.tool === 'flatten' && state.flattenMode === 'polygon') return; // point adding is handled by 'click' below (needs e.detail to tell single vs double clicks apart)
+  if (state.tool === 'flatten' && state.flattenMode === 'box') {
+    mmDragStart = { vx, vz };
+    state.flattenBox = { x0: vx, z0: vz, x1: vx, z1: vz };
+    return;
+  }
+  mmDragStart = { vx, vz };
+});
+mmCanvas.addEventListener('click', (e) => {
+  if (!state.loaded) return;
+  if (!(state.tool === 'flatten' && state.flattenMode === 'polygon')) return;
+  const { vx, vz } = mmVoxelFromEvent(e);
+  if (e.detail >= 2) return; // the 'dblclick' handler below finishes the shape; ignore the 2nd click here so it doesn't also add a point
+  if (state.polygonFinished) { state.polygon = []; state.polygonFinished = false; } // a click after finishing starts a fresh shape
+  const sampled = sampleHeightWorldY(vx, vz);
+  state.polygon.push({ vx, vz, h: sampled != null ? sampled : parseFloat(document.getElementById('flattenY').value) || 0 });
+  if (state.flattenGradient) renderPolygonHeightList();
+  drawMinimap();
+});
+mmCanvas.addEventListener('pointermove', (e) => {
+  if (state.tool === 'flatten' && state.flattenMode === 'polygon' && state.polygon.length > 0 && !state.polygonFinished) {
+    state.polygonHover = mmVoxelFromEvent(e);
+    drawMinimap();
+    return;
+  }
+  if (!mmDragStart) return;
+  if (state.tool === 'flatten' && state.flattenMode === 'box') {
+    const { vx, vz } = mmVoxelFromEvent(e);
+    state.flattenBox = { x0: Math.min(mmDragStart.vx,vx), z0: Math.min(mmDragStart.vz,vz), x1: Math.max(mmDragStart.vx,vx), z1: Math.max(mmDragStart.vz,vz) };
+    drawMinimap();
+  }
+});
+mmCanvas.addEventListener('dblclick', (e) => {
+  if (state.tool === 'flatten' && state.flattenMode === 'polygon') { e.preventDefault(); if (state.polygon.length >= 3) finishPolygon(); return; }
+  // otherwise: double-click resets the minimap zoom/pan back to the full extent
+  state.mmView = { x0: 0, z0: 0, x1: state.maxVX, z1: state.maxVZ };
+  drawMinimap();
+});
+window.addEventListener('pointerup', (e) => {
+  if (!mmDragStart) return;
+  if (state.tool !== 'flatten') {
+    const rect = mmCanvas.getBoundingClientRect();
+    const inside = e.clientX>=rect.left&&e.clientX<=rect.right&&e.clientY>=rect.top&&e.clientY<=rect.bottom;
+    if (inside) {
+      const bx = Math.floor(mmDragStart.vx/state.leafSize), bz = Math.floor(mmDragStart.vz/state.leafSize);
+      const h = bx>=0&&bz>=0&&bx<state.nbx&&bz<state.nbz ? state.heightMap[bx*state.nbz+bz] : -1;
+      const fy = h>=0 ? h+8 : Math.floor(state.maxVY/2);
+      state.focus.copy(voxelToWorld(mmDragStart.vx, fy, mmDragStart.vz));
+    }
+  } else if (state.flattenMode === 'box' && state.flattenBox) {
+    const cx = Math.floor((state.flattenBox.x0+state.flattenBox.x1)/2/state.leafSize);
+    const cz = Math.floor((state.flattenBox.z0+state.flattenBox.z1)/2/state.leafSize);
+    const h = cx>=0&&cz>=0&&cx<state.nbx&&cz<state.nbz ? state.heightMap[cx*state.nbz+cz] : -1;
+    if (h>=0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h+1)*state.meta.voxelResolution).toFixed(2);
+    if (state.flattenGradient) resampleGradientHeights();
+  }
+  mmDragStart = null;
+  drawMinimap();
+});
+
+/* ---- fullscreen minimap ---- */
+let mmFullscreen = false;
+function sizeMinimapCanvas() {
+  if (mmFullscreen) {
+    // the wrapper fills the available space (not necessarily square) — constrain the canvas
+    // itself to a centered square so voxel X/Z map 1:1 and the view isn't stretched.
+    const r = mmWrap.getBoundingClientRect();
+    const side = Math.max(1, Math.floor(Math.min(r.width, r.height)));
+    mmCanvas.style.width = side + 'px';
+    mmCanvas.style.height = side + 'px';
+    mmCanvas.style.left = Math.round((r.width - side) / 2) + 'px';
+    mmCanvas.style.top = Math.round((r.height - side) / 2) + 'px';
+    mmCanvas.style.right = 'auto';
+    mmCanvas.style.bottom = 'auto';
+    mmCanvas.width = side;
+    mmCanvas.height = side;
+  } else {
+    mmCanvas.style.width = ''; mmCanvas.style.height = '';
+    mmCanvas.style.left = ''; mmCanvas.style.top = '';
+    mmCanvas.style.right = ''; mmCanvas.style.bottom = '';
+    const r = mmCanvas.getBoundingClientRect();
+    mmCanvas.width = Math.max(1, Math.round(r.width));
+    mmCanvas.height = Math.max(1, Math.round(r.height));
+  }
+  mmImageData = null;
+}
+function setMinimapFullscreen(full) {
+  mmFullscreen = full;
+  mmWrap.classList.toggle('mm-full', full);
+  document.getElementById('minimapFullscreenBtn').textContent = full ? '✕' : '⤢';
+  requestAnimationFrame(() => { sizeMinimapCanvas(); drawMinimap(); });
+}
+document.getElementById('minimapFullscreenBtn').addEventListener('click', () => setMinimapFullscreen(!mmFullscreen));
+window.addEventListener('resize', () => { if (mmFullscreen) { sizeMinimapCanvas(); drawMinimap(); } });
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape') {
+    if (mmFullscreen) setMinimapFullscreen(false);
+    else if (state.polygon.length > 0) { state.polygon = []; state.polygonHover = null; drawMinimap(); }
+  }
+});
+
+/* ---- tool selection UI ---- */
+function selectTool(name) {
+  state.tool = name;
+  for (const id of ['toolAdd','toolRemove','toolFlatten','toolOrbit']) document.getElementById(id).classList.remove('active');
+  const map = { add:'toolAdd', remove:'toolRemove', flatten:'toolFlatten', orbit:'toolOrbit' };
+  document.getElementById(map[name]).classList.add('active');
+}
+document.getElementById('toolAdd').addEventListener('click', () => selectTool('add'));
+document.getElementById('toolRemove').addEventListener('click', () => selectTool('remove'));
+document.getElementById('toolFlatten').addEventListener('click', () => selectTool('flatten'));
+document.getElementById('toolOrbit').addEventListener('click', () => selectTool('orbit'));
+document.getElementById('brushWidth').addEventListener('input', (e) => { state.brushWidth = parseInt(e.target.value); document.getElementById('brushWidthVal').textContent = e.target.value; });
+document.getElementById('brushHeight').addEventListener('input', (e) => { state.brushHeight = parseInt(e.target.value); document.getElementById('brushHeightVal').textContent = e.target.value; });
+document.getElementById('brushShape').addEventListener('change', (e) => state.brushShape = e.target.value);
+document.getElementById('renderRadius').addEventListener('input', (e) => { document.getElementById('renderRadiusVal').textContent = e.target.value; markDirtyAll(); });
+document.getElementById('toggleOverview').addEventListener('click', () => setOverviewMode(!state.overviewMode));
+document.getElementById('heightClip').addEventListener('input', (e) => {
+  state.heightClip = parseFloat(e.target.value);
+  const gb = state.meta.gridBounds;
+  const label = document.getElementById('clipLabel');
+  label.textContent = state.heightClip >= gb.max[1] - 1e-6 ? 'off' : state.heightClip.toFixed(2);
+  markDirtyAll();
+  computeHeightMap();
+  drawMinimap();
+});
+document.getElementById('resetClip').addEventListener('click', () => {
+  const gb = state.meta.gridBounds;
+  document.getElementById('heightClip').value = gb.max[1];
+  state.heightClip = gb.max[1];
+  document.getElementById('clipLabel').textContent = 'off';
+  markDirtyAll();
+  computeHeightMap();
+  drawMinimap();
+});
+
+/* ---- main loop ---- */
+function loop() {
+  requestAnimationFrame(loop);
+  if (state.loaded) {
+    const res = state.meta.voxelResolution;
+    const speed = res * 40 * (1/60) * 6;
+    const fwd = new THREE.Vector3(Math.sin(camState.azimuth), 0, Math.cos(camState.azimuth));
+    const right = new THREE.Vector3(fwd.z, 0, -fwd.x);
+    if (keys['KeyW']) state.focus.addScaledVector(fwd, -speed);
+    if (keys['KeyS']) state.focus.addScaledVector(fwd, speed);
+    if (keys['KeyA']) state.focus.addScaledVector(right, -speed);
+    if (keys['KeyD']) state.focus.addScaledVector(right, speed);
+    if (keys['KeyQ']) state.focus.y -= speed;
+    if (keys['KeyE']) state.focus.y += speed;
+    updateCameraFromState();
+    streamTimer++;
+    if (streamTimer % 12 === 0 && !state.overviewMode) streamChunks();
+    if (pendingFlush) { flushDirty(); pendingFlush = false; }
+    flushDirty();
+    document.getElementById('overlay').innerHTML =
+      'focus <b>' + state.focus.x.toFixed(1) + ', ' + state.focus.y.toFixed(1) + ', ' + state.focus.z.toFixed(1) + '</b><br>' +
+      'tool <b>' + state.tool + '</b> · brush Ø <b>' + state.brushWidth + '×' + state.brushHeight + '</b>';
+  }
+  renderer.render(scene, camera);
+}
+
+/* ======================================================================
+   PART 5 — export
+   ====================================================================== */
+document.getElementById('exportBtn').addEventListener('click', async () => {
+  if (!state.loaded) return;
+  showProgress('Compacting & encoding…');
+  await nextTick();
+  const compacted = compact(state.holder.root);
+  const enc = encodeTree(compacted);
+  const newMeta = Object.assign({}, state.meta, {
+    numInteriorNodes: enc.numInteriorNodes,
+    numMixedLeaves: enc.numMixedLeaves,
+    nodeCount: enc.nodes.length,
+    leafDataCount: enc.leafData.length,
+  });
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(newMeta, null, 2));
+  const binBytes = new Uint8Array(enc.nodes.length * 4 + enc.leafData.length * 4);
+  const dv = new DataView(binBytes.buffer);
+  for (let i = 0; i < enc.nodes.length; i++) dv.setUint32(i * 4, enc.nodes[i], true);
+  const off = enc.nodes.length * 4;
+  for (let i = 0; i < enc.leafData.length; i++) dv.setUint32(off + i * 4, enc.leafData[i], true);
+
+  const stem = 'terrain_edited';
+  const zip = makeZip([
+    { name: stem + '.voxel.json', data: jsonBytes },
+    { name: stem + '.voxel.bin', data: binBytes },
+  ]);
+  hideProgress();
+
+  const dl = (await window.claude?.use?.('downloads')) || null;
+  if (dl) {
+    try {
+      await dl.save({ filename: stem + '.voxel.zip', data: new Blob([zip]) });
+    } catch (err) {
+      alert('Save was not completed: ' + (err && err.message ? err.message : err));
+    }
+  } else {
+    alert('Downloads are not available in this view.');
+  }
+});
+
+/* ---- boot ---- */
+initScene();
+setupPointerHandlers();
+updateCameraFromState();
+</script>
+</body>
+</html>
