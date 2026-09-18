@@ -1417,15 +1417,23 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   ]);
   hideProgress();
 
+  const blob = new Blob([zip], { type: 'application/zip' });
   const dl = (await window.claude?.use?.('downloads')) || null;
   if (dl) {
     try {
-      await dl.save({ filename: stem + '.voxel.zip', data: new Blob([zip]) });
+      await dl.save({ filename: stem + '.voxel.zip', data: blob });
     } catch (err) {
       alert('Save was not completed: ' + (err && err.message ? err.message : err));
     }
   } else {
-    alert('Downloads are not available in this view.');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = stem + '.voxel.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 });
 
