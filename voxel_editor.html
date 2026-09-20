@@ -974,6 +974,10 @@ function setupPointerHandlers() {
       return;
     }
     if (state.tool === 'add' || state.tool === 'remove') {
+      // One brush application per press, not one per pointermove: dragging the brush
+      // across the surface carves away far more than you meant, and the damage arrives
+      // faster than you can let go. Hold is still a single stroke on the undo stack —
+      // press again to paint again.
       strokeStart();
       paintAt(e.clientX, e.clientY);
       dragging = true; dragButton = e.button; el.setPointerCapture(e.pointerId);
@@ -1010,9 +1014,8 @@ function setupPointerHandlers() {
       camState.azimuth -= dx * 0.006;
       camState.polar = THREE.MathUtils.clamp(camState.polar - dy * 0.006, 0.15, Math.PI - 0.15);
       lastX = e.clientX; lastY = e.clientY;
-    } else if (state.tool === 'add' || state.tool === 'remove') {
-      paintAt(e.clientX, e.clientY);
     }
+    // add/remove deliberately do nothing here — the brush fired on the press
   });
   window.addEventListener('pointerup', (e) => {
     // Release the drag first. Everything after this is voxel-grid bookkeeping that throws
@@ -1046,11 +1049,28 @@ function setupPointerHandlers() {
   }, { passive: false });
 }
 
+// Every tool works off `raycaster`, and only these two functions decide where that ray
+// comes from — the mouse through the screen, or a VR controller (PART 7). Everything
+// below them takes the ray as given, which is what lets the controller be the mouse.
 const raycaster = new THREE.Raycaster();
-function paintAt(clientX, clientY) {
+const _mouseNDC = new THREE.Vector2();
+function setRaycasterFromScreen(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
-  const mouse = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-  raycaster.setFromCamera(mouse, camera);
+  _mouseNDC.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(_mouseNDC, camera);
+}
+const _ctrlRot = new THREE.Matrix4(), _ctrlOrigin = new THREE.Vector3(), _ctrlDir = new THREE.Vector3();
+function setRaycasterFromController(ctrl) {
+  // extractRotation, not the full matrix: the XR rig's world scale lives in there too and
+  // a ray direction has to come out unit length
+  _ctrlRot.extractRotation(ctrl.matrixWorld);
+  _ctrlOrigin.setFromMatrixPosition(ctrl.matrixWorld);
+  _ctrlDir.set(0, 0, -1).applyMatrix4(_ctrlRot).normalize();
+  raycaster.set(_ctrlOrigin, _ctrlDir);
+}
+
+function paintAt(clientX, clientY) { setRaycasterFromScreen(clientX, clientY); paintAtRay(); }
+function paintAtRay() {
   if (state.overviewMode) {
     // the overview is a coarse stand-in (one box per leaf node), not precise enough to edit —
     // clicking it instead jumps the focus there and switches to the detailed, editable view.
@@ -1318,24 +1338,28 @@ function worldToScreenPx(x, y, z) {
 }
 // every draggable handle of the polygon, in client pixels: one per vertex, plus one per edge
 // midpoint once the shape is closed (dragging one of those inserts a point there)
-function polygonHandlesScreen() {
+function polygonHandlesWorld() {
   const out = [];
   if (!state.loaded || state.flattenMode !== 'polygon') return out;
   const poly = state.polygon;
   const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
   const heightFn = flattenHeightFn().fn;
-  const at = (px, pz) => worldToScreenPx(gb.min[0] + px * res, flattenSurfaceY(px, pz, heightFn), gb.min[2] + pz * res);
-  poly.forEach((pt, i) => {
-    const sp = at(pt.vx, pt.vz);
-    if (sp) out.push({ kind: 'vertex', index: i, sx: sp[0], sy: sp[1] });
-  });
+  const at = (px, pz) => new THREE.Vector3(gb.min[0] + px * res, flattenSurfaceY(px, pz, heightFn), gb.min[2] + pz * res);
+  poly.forEach((pt, i) => out.push({ kind: 'vertex', index: i, p: at(pt.vx, pt.vz) }));
   if (state.polygonFinished && poly.length >= 3) {
     for (let i = 0; i < poly.length; i++) {
       const a = poly[i], b = poly[(i + 1) % poly.length];
       const mx = (a.vx + b.vx) / 2, mz = (a.vz + b.vz) / 2;
-      const sp = at(mx, mz);
-      if (sp) out.push({ kind: 'edge', index: i, sx: sp[0], sy: sp[1], vx: Math.round(mx), vz: Math.round(mz) });
+      out.push({ kind: 'edge', index: i, vx: Math.round(mx), vz: Math.round(mz), p: at(mx, mz) });
     }
+  }
+  return out;
+}
+function polygonHandlesScreen() {
+  const out = [];
+  for (const h of polygonHandlesWorld()) {
+    const sp = worldToScreenPx(h.p.x, h.p.y, h.p.z);
+    if (sp) out.push(Object.assign({}, h, { sx: sp[0], sy: sp[1] }));
   }
   return out;
 }
@@ -1352,6 +1376,26 @@ function pickPolygonHandle(clientX, clientY, handles) {
     }
     if (best) return best;
     bestD = Infinity;
+  }
+  return null;
+}
+// The VR equivalent of the pixel-radius pick above. A controller has no pixels, so the
+// radius is an *angle* off the ray instead — same forgiving target at any distance, and
+// unaffected by the rig's world scale, which cancels out of the ratio.
+const XR_HANDLE_ANGLE = 0.04;   // ~2.3° for a vertex
+const _handleV = new THREE.Vector3();
+function pickPolygonHandleRay(ray) {
+  const hs = polygonHandlesWorld();
+  for (const kind of ['vertex', 'edge']) {
+    let best = null, bestD = Infinity;
+    for (const h of hs) {
+      if (h.kind !== kind) continue;
+      if (ray.direction.dot(_handleV.copy(h.p).sub(ray.origin)) <= 0) continue; // behind the hand
+      const limit = (XR_HANDLE_ANGLE * (kind === 'vertex' ? 1 : 0.75) * ray.origin.distanceTo(h.p)) ** 2;
+      const d = ray.distanceSqToPoint(h.p);
+      if (d <= limit && d < bestD) { bestD = d; best = h; }
+    }
+    if (best) return best;
   }
   return null;
 }
@@ -1740,9 +1784,11 @@ function buildFlattenOverlay() {
 // when the ray misses everything, so a drag can still run off the edge of the terrain.
 function surfacePointAt(clientX, clientY) {
   if (!state.loaded) return null;
-  const rect = renderer.domElement.getBoundingClientRect();
-  const mouse = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-  raycaster.setFromCamera(mouse, camera);
+  setRaycasterFromScreen(clientX, clientY);
+  return surfacePointAtRay();
+}
+function surfacePointAtRay() {
+  if (!state.loaded) return null;
   const targets = state.overviewMode ? (overviewMesh ? [overviewMesh] : []) : chunkGroup.children;
   const hits = raycaster.intersectObjects(targets, false);
   const res = state.meta.voxelResolution;
@@ -2886,18 +2932,35 @@ function initSplats() {
    interpupillary distance scales with it — which is what makes you feel
    small or huge in the scene rather than merely zoomed, and is why the
    A/B rescale (below) is a real change of viewpoint and not a zoom.
+   The trigger is the mouse button: the controller's ray feeds the same
+   `raycaster` the cursor does (see setRaycasterFromController), so every
+   tool — brush, flatten box, polygon handles, height pick — runs its
+   existing code path with the ray coming from your hand instead of
+   through the screen. Only the *picking* differs: a polygon handle is a
+   pixel radius on screen and an angle off the ray in here.
+
    Frames come from renderer.setAnimationLoop, and the splat shader's
    focal/viewport uniforms are refilled per frame from the XR camera's own
    projection and eye viewport — the window's size means nothing in here.
    ====================================================================== */
 const xr = {
-  scale: 1, lastTime: 0,
-  headPos: null, headQuat: null, controllers: [],
+  scale: 1, lastTime: 0, aimHand: 0, aimPinned: false, cursor: null,
+  headPos: null, headQuat: null, controllers: [], prevBtn: {},
 };
+// mouse-button state for the controllers: which hand holds the trigger, and what that
+// press started (a stroke, a flatten box, a polygon point waiting on the release)
+const xrPtr = { hand: -1, stroke: false, box: null, polyPending: false };
+const XR_RAY_LEN = 1.5;   // metres of ray drawn when it is not pointing at anything
 const _XR_UP = new THREE.Vector3(0, 1, 0);
 const _xrFwd = new THREE.Vector3(), _xrRight = new THREE.Vector3(), _xrHead = new THREE.Vector3();
 
 function xrDead(v) { return Math.abs(v) < 0.18 ? 0 : v; }   // thumbsticks rest off-centre
+// true on the frame a button goes down, so one press is one undo and not sixty
+function xrEdge(hand, btn, down) {
+  const key = hand + ':' + btn, was = xr.prevBtn[key];
+  xr.prevBtn[key] = down;
+  return down && !was;
+}
 const XR_TURN_RATE = Math.PI * 0.6;   // radians/s at full stick (~108°/s)
 
 async function initXR() {
@@ -2915,22 +2978,171 @@ async function initXR() {
   try { ok = await navigator.xr.isSessionSupported('immersive-vr'); } catch (e) { ok = false; }
   if (!ok) return;
   btn.style.display = '';
+  btn.title = 'Trigger: use the current tool where the ray lands (on a polygon, trigger the ' +
+              'first or last marker to close it) · Grip: sprint, and the alt-click that deletes ' +
+              'a polygon point · Left stick: move · Right stick: turn / up-down · ' +
+              'A,B: world scale · X,Y: undo, redo';
   btn.addEventListener('click', () => {
     if (renderer.xr.isPresenting) { const s = renderer.xr.getSession(); if (s) s.end(); return; }
     navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] })
       .then(startXRSession, err => { btn.textContent = 'VR unavailable'; console.error(err); });
   });
 
-  // a short ray out of each hand, so you can see where the controllers are
+  // a ray out of each hand; the aiming one is trimmed to its hit each frame
   const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
   const rayMat = new THREE.LineBasicMaterial({ color: 0x4fb8ae, transparent: true, opacity: 0.6 });
   for (let i = 0; i < 2; i++) {
     const c = renderer.xr.getController(i);
     const line = new THREE.Line(rayGeo, rayMat);
-    line.scale.z = 0.4;   // metres — the rig's scale sizes it against whatever the world is
+    line.scale.z = XR_RAY_LEN;
     c.add(line);
+    c.userData.ray = line;
     xrRig.add(c);
     xr.controllers.push(c);
+  }
+  // where the ray lands: the VR mouse cursor. In world space, not on the rig, and drawn
+  // over everything — a dot buried in the surface you are about to edit is no use.
+  xr.cursor = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0x4fb8ae, depthTest: false, transparent: true, opacity: 0.9 }));
+  xr.cursor.renderOrder = 999;
+  xr.cursor.visible = false;
+  scene.add(xr.cursor);
+}
+
+/* ---- the trigger as a mouse button ----
+   The same order of business as setupPointerHandlers' pointerdown/move/up, minus the
+   things a hand does not have: no right-drag to orbit (you fly), and no dblclick, so a
+   second trigger click in the same spot closes a polygon the way a double-click does. */
+const XR_TOOL_COLORS = { add: 0x6cbf7a, remove: 0xd9705f };
+function xrToolColor() { return XR_TOOL_COLORS[state.tool] || 0x4fb8ae; }
+
+function xrPointerDown(ctrl, mod) {
+  if (!state.loaded || state.tool === 'orbit') return;   // splats-only or flying: nothing to edit
+  setRaycasterFromController(ctrl);
+  if (state.tool === 'pick') {
+    const hit = surfacePointAtRay();
+    if (hit) applyPickedHeight(hit.vx, hit.vz, hit.topWorldY);
+    return;
+  }
+  if (state.tool === 'flatten') {
+    if (state.flattenMode === 'polygon') {
+      const handle = pickPolygonHandleRay(raycaster.ray);
+      // Closing the shape: point at the first or last marker you placed and pull. The
+      // mouse closes on a double-click, which is the one gesture a hand cannot do —
+      // aim wanders between the two pulls, and the second pull lands on the point you
+      // just placed, where the handle grab below swallowed it before it could count.
+      // So closing is an explicit target, and it wins over grabbing that same handle.
+      if (xrPolygonClosingHandle(handle)) { finishPolygon(); return; }
+      // grip held is the alt-click that deletes a vertex
+      if (beginPolygonHandleDrag(handle, 'xr', mod)) return;
+      xrPtr.polyPending = true;   // nothing hit: a new point, placed on release
+      return;
+    }
+    if (state.flattenMode !== 'box') return;
+    const hit = surfacePointAtRay();
+    if (!hit) return;
+    xrPtr.box = { vx: hit.vx, vz: hit.vz };
+    state.flattenBox = { x0: hit.vx, z0: hit.vz, x1: hit.vx, z1: hit.vz };
+    drawMinimap();
+    return;
+  }
+  if (state.tool === 'add' || state.tool === 'remove') {
+    // fires once, as on the mouse: sweeping a held trigger over the terrain was the
+    // fastest way to wreck it, and a hand is shakier than a cursor
+    strokeStart();
+    paintAtRay();
+    xrPtr.stroke = true;
+  }
+}
+
+// Which points close the shape: the first (the usual way to close a polygon) and the
+// last (what a double-click meant). Only once there are three, and only while tracing —
+// a finished shape's handles are all for editing.
+function xrPolygonTracing() {
+  return state.flattenMode === 'polygon' && !state.polygonFinished && state.polygon.length >= 3;
+}
+function xrPolygonClosingHandle(handle) {
+  if (!xrPolygonTracing() || !handle || handle.kind !== 'vertex') return false;
+  return handle.index === 0 || handle.index === state.polygon.length - 1;
+}
+function xrPolygonClosingColumn(vx, vz) {
+  if (!xrPolygonTracing()) return false;
+  const poly = state.polygon;
+  for (const pt of [poly[0], poly[poly.length - 1]]) {
+    if (Math.abs(pt.vx - vx) <= 1 && Math.abs(pt.vz - vz) <= 1) return true;
+  }
+  return false;
+}
+
+function xrPointerMove(ctrl) {
+  if (!state.loaded) return;
+  setRaycasterFromController(ctrl);
+  if (polygonDrag && polygonDrag.source === 'xr') {
+    const hit = surfacePointAtRay();
+    if (hit) dragPolygonPointTo(hit.vx, hit.vz);
+    return;
+  }
+  if (xrPtr.box) {
+    const hit = surfacePointAtRay();
+    if (!hit) return;
+    state.flattenBox = {
+      x0: Math.min(xrPtr.box.vx, hit.vx), z0: Math.min(xrPtr.box.vz, hit.vz),
+      x1: Math.max(xrPtr.box.vx, hit.vx), z1: Math.max(xrPtr.box.vz, hit.vz),
+    };
+    drawMinimap();
+    return;
+  }
+  // nothing for add/remove: the brush already fired on the press
+}
+
+function xrPointerUp(ctrl) {
+  if (xrPtr.stroke) { xrPtr.stroke = false; if (state.loaded) strokeEnd(); }
+  if (xrPtr.box) { xrPtr.box = null; seedFlattenHeightsFromBox(); drawMinimap(); }
+  if (polygonDrag && polygonDrag.source === 'xr') polygonDrag = null;
+  if (xrPtr.polyPending) {
+    xrPtr.polyPending = false;
+    if (!state.loaded) return;
+    setRaycasterFromController(ctrl);
+    const hit = surfacePointAtRay();
+    if (!hit) return;
+    // the same close, for an aim that landed on the terrain under an end marker rather
+    // than on the marker itself
+    if (xrPolygonClosingColumn(hit.vx, hit.vz)) { finishPolygon(); return; }
+    addPolygonPoint(hit.vx, hit.vz, hit.topWorldY);
+  }
+}
+
+// Aim feedback for the hand that last pulled the trigger: trim its ray to what it hit and
+// park the cursor there. One raycast a frame, and only when a tool could actually use it.
+function xrUpdateAim() {
+  const ctrl = xr.controllers[xr.aimHand];
+  const live = !!ctrl && state.loaded && state.tool !== 'orbit';
+  let localLen = XR_RAY_LEN;
+  if (live) {
+    setRaycasterFromController(ctrl);
+    const targets = state.overviewMode ? (overviewMesh ? [overviewMesh] : []) : chunkGroup.children;
+    const hits = raycaster.intersectObjects(targets, false);
+    if (hits.length) {
+      const res = state.meta.voxelResolution;
+      xr.cursor.position.copy(hits[0].point);
+      xr.cursor.scale.setScalar(res * 0.7);
+      xr.cursor.material.color.setHex(xrToolColor());
+      xr.cursor.visible = true;
+      localLen = hits[0].distance / xrRig.scale.x;   // the ray is drawn in rig-local metres
+    } else xr.cursor.visible = false;
+    // live rubber band while tracing a polygon, the same one the mouse draws on hover
+    if (state.tool === 'flatten' && state.flattenMode === 'polygon' &&
+        state.polygon.length > 0 && !state.polygonFinished && xrPtr.hand === -1) {
+      const hit = surfacePointAtRay();
+      if (hit && (!state.polygonHover || state.polygonHover.vx !== hit.vx || state.polygonHover.vz !== hit.vz)) {
+        state.polygonHover = { vx: hit.vx, vz: hit.vz };
+        drawMinimap();
+      }
+    }
+  } else if (xr.cursor) xr.cursor.visible = false;
+  for (let i = 0; i < xr.controllers.length; i++) {
+    const ray = xr.controllers[i].userData.ray;
+    if (ray) ray.scale.z = (i === xr.aimHand && live) ? localLen : XR_RAY_LEN;
   }
 }
 
@@ -2962,6 +3174,14 @@ async function startXRSession(session) {
 
 function endXRSession() {
   document.getElementById('vrBtn').textContent = 'Enter VR';
+  // a trigger still held when the session dies would otherwise leave a stroke unclosed
+  if (xrPtr.stroke && state.loaded) strokeEnd();
+  if (xrPtr.box) { xrPtr.box = null; seedFlattenHeightsFromBox(); }
+  if (polygonDrag && polygonDrag.source === 'xr') polygonDrag = null;
+  xrPtr.hand = -1; xrPtr.stroke = false; xrPtr.polyPending = false;
+  xr.prevBtn = {}; xr.aimPinned = false;
+  suppressPolygonClick = false;  // set by a handle grab in VR; it would eat the next mouse click
+  if (xr.cursor) xr.cursor.visible = false;
   // hand the VR viewpoint back to the orbit camera, so taking the headset off doesn't
   // teleport the desktop view back to wherever it was standing minutes ago
   if (xr.headPos && xr.headQuat) {
@@ -2994,20 +3214,36 @@ function updateXR() {
   xr.lastTime = now;
 
   let mx = 0, my = 0, vy = 0, turn = 0, zoom = 0, sprint = false;
-  for (const src of session.inputSources) {
-    const gp = src.gamepad;
+  const srcs = session.inputSources;
+  for (let i = 0; i < srcs.length; i++) {
+    const src = srcs[i], gp = src && src.gamepad;
     if (!gp || !gp.axes) continue;
     // axes 2/3 are the thumbstick on every headset controller; 0/1 are the old touchpad
     const ax = gp.axes.length >= 4 ? xrDead(gp.axes[2]) : xrDead(gp.axes[0] || 0);
     const ay = gp.axes.length >= 4 ? xrDead(gp.axes[3]) : xrDead(gp.axes[1] || 0);
-    const pressed = i => !!(gp.buttons && gp.buttons[i] && gp.buttons[i].pressed);
-    if (pressed(0)) sprint = true;                       // either trigger
+    const pressed = b => !!(gp.buttons && gp.buttons[b] && gp.buttons[b].pressed);
+    const trigger = pressed(0), grip = pressed(1);
+    if (grip) sprint = true;   // the trigger is the mouse button, so the grip sprints
     if (src.handedness === 'right') {
       turn = ax; vy = -ay;
       if (pressed(4)) zoom += 1;                         // A: grow the world around you
       if (pressed(5)) zoom -= 1;                         // B: shrink it
     } else {
       mx = ax; my = ay;
+      // X / Y undo and redo: a mis-aimed stroke in here needs taking back without a keyboard
+      if (state.loaded && xrEdge(i, 4, pressed(4))) doUndo();
+      if (state.loaded && xrEdge(i, 5, pressed(5))) doRedo();
+    }
+    const ctrl = xr.controllers[i];
+    if (!ctrl) continue;
+    // the aiming hand is the right one until a trigger says otherwise, then it is whichever
+    // hand last pulled one
+    if (src.handedness === 'right' && !xr.aimPinned) xr.aimHand = i;
+    if (xrPtr.hand === -1) {
+      if (trigger) { xrPtr.hand = i; xr.aimHand = i; xr.aimPinned = true; xrPointerDown(ctrl, grip); }
+    } else if (xrPtr.hand === i) {
+      if (trigger) xrPointerMove(ctrl);
+      else { xrPointerUp(ctrl); xrPtr.hand = -1; }
     }
   }
 
@@ -3040,6 +3276,7 @@ function updateXR() {
   xr.headQuat = camera.getWorldQuaternion(xr.headQuat || new THREE.Quaternion());
   if (state.loaded || splat.count > 0) state.focus.copy(_xrHead);
 
+  xrUpdateAim();
   updateSplatXRUniforms();
 }
 

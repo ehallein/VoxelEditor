@@ -115,6 +115,12 @@ Search for these comment headers in the file:
   `Math.floor((D-1)/2)` / `Math.ceil((D-1)/2)` on each side of the clicked
   voxel, so `D=1` is exactly one voxel. Sphere shape uses an ellipsoid test
   with the width/height as separate semi-axes when they differ.
+  **One application per press**, on both the mouse and a VR controller:
+  the brush used to fire on every pointermove (and every XR frame) while
+  the button was held, which paints or carves far more than you meant and
+  does it faster than you can let go. The press is still one stroke on the
+  undo stack; press again to apply again. The other tools are unchanged —
+  the flatten box and polygon handles still drag.
 - **Flatten (`applyFlatten`)**: box or polygon (even-odd point-in-polygon
   test) area selection, drawn either on the minimap or directly in the 3D
   view; runs in batches (`await nextTick()`) so it doesn't freeze the tab
@@ -308,10 +314,42 @@ and the desktop view keeps running on the mirrored canvas.
   origin they swing the world out from under you.
 - **Locomotion**: left stick moves along the head's heading, right stick
   is up/down plus smooth yaw (≈108°/s at full stick, eased quadratically
-  so small deflections turn slowly), either trigger sprints ×4. Note the
-  sign: a +Y rotation of the rig swings your facing *left*, so the stick's
-  X is negated. `state.focus` follows the head each frame so chunk
-  streaming keeps up with where you fly.
+  so small deflections turn slowly), grip sprints ×4. Note the sign: a +Y
+  rotation of the rig swings your facing *left*, so the stick's X is
+  negated. `state.focus` follows the head each frame so chunk streaming
+  keeps up with where you fly.
+- **The trigger is the mouse button**, and the controller's ray is the
+  cursor: `setRaycasterFromController` fills the same `raycaster` that
+  `setRaycasterFromScreen` does, so brush, flatten box, polygon and height
+  pick all run their existing code — `paintAtRay` / `surfacePointAtRay`
+  are just the mouse handlers' bodies with the ray taken as given. The VR
+  handlers mirror pointerdown/move/up one for one, minus what a hand does
+  not have: no right-drag orbit (you fly). The brush fires once per
+  trigger press, as it does per mouse press. Grip + trigger on a vertex is
+  the alt-click that deletes it; X and Y on the left controller
+  are undo and redo, because a mis-aimed stroke in a headset has no
+  keyboard to take it back with.
+- **Closing a polygon is its own gesture in VR**: aim at the first or the
+  last marker and pull. A double-click is the one thing a hand cannot do —
+  the aim wanders between the two pulls, and worse, the second pull lands
+  on the point just placed, where the handle grab swallowed it before it
+  could ever count as a double (which is exactly how the first attempt at
+  this, a timed double-pull, failed). So the close is an explicit target
+  and it takes priority over grabbing that same handle. It applies only
+  while tracing with three or more points; on a finished shape every
+  handle, ends included, is back to being an edit handle. The mouse still
+  closes on a double-click, which is unchanged.
+- **Handle picking is the one thing that could not be reused.** On screen
+  a polygon handle is a pixel radius (`POLY_HANDLE_PX`), which is what
+  keeps a distant marker hittable; a controller has no pixels, so
+  `pickPolygonHandleRay` uses an *angle* off the ray instead
+  (`XR_HANDLE_ANGLE`) — the same forgiving target at any distance, and
+  scale-free, since the rig's scale cancels out of the ratio.
+  `polygonHandlesWorld()` is the shared source both pickers read.
+- **Aim feedback**: the hand that last pulled a trigger gets its ray
+  trimmed to whatever it hit and a cursor dot dropped there, tinted by
+  tool. That is one extra raycast per frame, and it is skipped whenever no
+  tool could use it (no grid, or the orbit tool).
 - **Frames come from `renderer.setAnimationLoop`**, not `requestAnimation-
   Frame`: in a session they have to come from the headset's clock. Outside
   one three falls back to rAF itself, so the single `loop()` serves both.
