@@ -86,8 +86,9 @@
       <div class="toolgrid">
         <button id="toolAdd" class="active">Add / fill (1)</button>
         <button id="toolRemove">Remove (2)</button>
-        <button id="toolFlatten">Flatten box (3)</button>
+        <button id="toolFlatten">Flatten area (3)</button>
         <button id="toolOrbit">Camera only (4)</button>
+        <button id="toolPick">Pick height (5)</button>
       </div>
       <div class="row"><label>Width Ø</label><input id="brushWidth" type="range" min="1" max="48" value="8"><span id="brushWidthVal" style="font-family:var(--mono);font-size:11px;width:26px;text-align:right">8</span></div>
       <div class="row"><label>Height Ø</label><input id="brushHeight" type="range" min="1" max="48" value="8"><span id="brushHeightVal" style="font-family:var(--mono);font-size:11px;width:26px;text-align:right">8</span></div>
@@ -102,7 +103,8 @@
         <button id="flattenModeBox" class="active">Box</button>
         <button id="flattenModePolygon">Polygon</button>
       </div>
-      <div class="hint" id="flattenHint">Drag a rectangle on the minimap to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.</div>
+      <div class="hint" id="flattenHint">Drag a rectangle on the minimap or in the 3D view to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.</div>
+      <div class="hint">The selection is drawn into the 3D view as the surface Apply would leave — <b>green</b> where it fills, <b>red</b> where it cuts — and you can draw it there directly instead of on the minimap.</div>
       <div class="toolgrid" id="polygonButtons" style="display:none">
         <button id="finishPolygon" class="btn">Finish shape</button>
         <button id="clearPolygon" class="btn">Clear points</button>
@@ -112,6 +114,7 @@
       <div id="flattenFlatControls" style="display:flex;flex-direction:column;gap:8px">
         <div class="row"><label>Target Y</label><input id="flattenY" type="number" step="0.1"></div>
         <button id="sampleHeight" class="btn">Sample height at last click</button>
+        <button id="pickHeightBtn" class="btn">Eyedropper: pick height (5)</button>
       </div>
       <div id="flattenGradientControls" style="display:none;flex-direction:column;gap:8px">
         <div id="gradientBoxControls" class="toolgrid">
@@ -122,14 +125,16 @@
         </div>
         <div id="gradientPolygonControls" style="display:flex;flex-direction:column;gap:8px"></div>
         <button id="resampleGradient" class="btn">Resample from terrain</button>
+        <button id="pickHeightBtnGrad" class="btn">Eyedropper: pick height (5)</button>
       </div>
+      <div class="hint" id="pickHint" style="display:none"></div>
       <button id="applyFlatten" class="primary">Apply flatten</button>
     </section>
     <section id="navSection" style="display:none">
       <h2>Navigate</h2>
-      <div class="hint">Drag = orbit · scroll = zoom · WASD = move focus · Q/E = focus up/down. Click the minimap to jump the focus point. Scroll the minimap to zoom it.</div>
+      <div class="hint">Drag = orbit · scroll = zoom · WASD = move focus · Q/E = focus up/down. Click the minimap to jump the focus point. Scroll the minimap to zoom it. While a flatten tool is active the left button draws the selection instead — right-drag still orbits.</div>
       <button id="toggleOverview" class="btn">Show entire model</button>
-      <div class="hint" id="overviewHint" style="display:none">Low-detail whole-scene view (each leaf block is one box — no per-voxel surface, no editing here). Click anywhere to jump there and switch back to the detailed, editable view.</div>
+      <div class="hint" id="overviewHint" style="display:none">Low-detail whole-scene view (each leaf block is one box — no per-voxel surface, no editing here). Click anywhere to jump there and switch back to the detailed, editable view — except with a flatten tool active, where the click draws the selection instead, which is the easy way to pick out a large area.</div>
       <div class="row"><label>Render r</label><input id="renderRadius" type="range" min="1" max="6" value="3"><span id="renderRadiusVal" style="font-family:var(--mono);font-size:11px;width:16px">3</span></div>
     </section>
     <section id="clipSection" style="display:none">
@@ -888,6 +893,7 @@ window.addEventListener('keydown', e => {
   if (e.code === 'Digit2') selectTool('remove');
   if (e.code === 'Digit3') selectTool('flatten');
   if (e.code === 'Digit4') selectTool('orbit');
+  if (e.code === 'Digit5') selectTool('pick');
   if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') { e.preventDefault(); if (e.shiftKey) doRedo(); else doUndo(); }
   if ((e.metaKey || e.ctrlKey) && e.code === 'KeyY') { e.preventDefault(); doRedo(); }
 });
@@ -903,6 +909,7 @@ function updateCameraFromState() {
 }
 
 let dragging = false, dragButton = -1, lastX = 0, lastY = 0;
+let view3dBoxDrag = null; // {vx,vz} anchor while dragging a flatten box out in the 3D view
 const dom = () => renderer.domElement;
 document.addEventListener('DOMContentLoaded', () => {}); // noop, init happens below
 
@@ -911,6 +918,24 @@ function setupPointerHandlers() {
   el.addEventListener('pointerdown', (e) => {
     if (!state.loaded) return;
     if (e.button === 2 || state.tool === 'orbit') { dragging = true; dragButton = e.button; lastX = e.clientX; lastY = e.clientY; el.setPointerCapture(e.pointerId); return; }
+    if (state.tool === 'pick') {
+      const hit = surfacePointAt(e.clientX, e.clientY);
+      if (hit) applyPickedHeight(hit.vx, hit.vz, hit.topWorldY);
+      else setPickHint('Nothing under the cursor to sample.');
+      return;
+    }
+    if (state.tool === 'flatten') {
+      // polygon points are added on 'click' below — it needs e.detail to tell a single click
+      // from the first half of a double-click, exactly as the minimap does
+      if (state.flattenMode !== 'box') return;
+      const hit = surfacePointAt(e.clientX, e.clientY);
+      if (!hit) return;
+      view3dBoxDrag = { vx: hit.vx, vz: hit.vz };
+      state.flattenBox = { x0: hit.vx, z0: hit.vz, x1: hit.vx, z1: hit.vz };
+      dragging = true; dragButton = e.button; el.setPointerCapture(e.pointerId);
+      drawMinimap();
+      return;
+    }
     if (state.tool === 'add' || state.tool === 'remove') {
       strokeStart();
       paintAt(e.clientX, e.clientY);
@@ -918,7 +943,26 @@ function setupPointerHandlers() {
     }
   });
   el.addEventListener('pointermove', (e) => {
+    // live rubber band to the cursor while tracing a polygon (no button held)
+    if (!dragging && state.tool === 'flatten' && state.flattenMode === 'polygon' && state.polygon.length > 0 && !state.polygonFinished) {
+      const hit = surfacePointAt(e.clientX, e.clientY);
+      if (hit && (!state.polygonHover || state.polygonHover.vx !== hit.vx || state.polygonHover.vz !== hit.vz)) {
+        state.polygonHover = { vx: hit.vx, vz: hit.vz };
+        drawMinimap();
+      }
+      return;
+    }
     if (!dragging) return;
+    if (view3dBoxDrag) {
+      const hit = surfacePointAt(e.clientX, e.clientY);
+      if (!hit) return;
+      state.flattenBox = {
+        x0: Math.min(view3dBoxDrag.vx, hit.vx), z0: Math.min(view3dBoxDrag.vz, hit.vz),
+        x1: Math.max(view3dBoxDrag.vx, hit.vx), z1: Math.max(view3dBoxDrag.vz, hit.vz),
+      };
+      drawMinimap();
+      return;
+    }
     if (dragButton === 2 || state.tool === 'orbit') {
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       camState.azimuth -= dx * 0.006;
@@ -930,7 +974,21 @@ function setupPointerHandlers() {
   });
   window.addEventListener('pointerup', (e) => {
     if (dragging && (state.tool === 'add' || state.tool === 'remove')) strokeEnd();
+    if (view3dBoxDrag) { view3dBoxDrag = null; seedFlattenHeightsFromBox(); drawMinimap(); }
     dragging = false; dragButton = -1;
+  });
+  // polygon points in the 3D view, on the same click/dblclick pair the minimap uses
+  el.addEventListener('click', (e) => {
+    if (!state.loaded || state.tool !== 'flatten' || state.flattenMode !== 'polygon') return;
+    if (e.detail >= 2) return; // the 'dblclick' handler finishes the shape; don't also add a point
+    const hit = surfacePointAt(e.clientX, e.clientY);
+    if (!hit) return;
+    addPolygonPoint(hit.vx, hit.vz, hit.topWorldY); // the height you clicked, not a resampled one
+  });
+  el.addEventListener('dblclick', (e) => {
+    if (!state.loaded || state.tool !== 'flatten' || state.flattenMode !== 'polygon') return;
+    e.preventDefault();
+    if (state.polygon.length >= 3) finishPolygon();
   });
   el.addEventListener('contextmenu', e => e.preventDefault());
   el.addEventListener('wheel', (e) => {
@@ -1038,14 +1096,22 @@ function flattenAreaBounds() {
   for (const p of state.polygon) { x0 = Math.min(x0, p.vx); x1 = Math.max(x1, p.vx); z0 = Math.min(z0, p.vz); z1 = Math.max(z1, p.vz); }
   return { x0: Math.floor(x0), z0: Math.floor(z0), x1: Math.ceil(x1), z1: Math.ceil(z1) };
 }
-// world-Y height of the terrain surface at voxel column (vx,vz), or null if outside/empty
-function sampleHeightWorldY(vx, vz) {
+// height of the terrain surface at voxel column (vx,vz) as a *column height* in voxels — the
+// number of solid voxels standing there, i.e. the same units a flatten target is in — or null
+// if the column is outside the grid or empty.
+function sampleHeightVY(vx, vz) {
   const bx = Math.floor(vx / state.leafSize), bz = Math.floor(vz / state.leafSize);
   if (bx < 0 || bz < 0 || bx >= state.nbx || bz >= state.nbz) return null;
   const h = state.heightMap[bx * state.nbz + bz];
-  if (h < 0) return null;
-  return state.meta.gridBounds.min[1] + (h + 1) * state.meta.voxelResolution;
+  return h < 0 ? null : h + 1;
 }
+// the same thing as a world Y (the top face of that column), or null
+function sampleHeightWorldY(vx, vz) {
+  const vy = sampleHeightVY(vx, vz);
+  return vy == null ? null : columnTopWorldY(vy);
+}
+// world Y of the top face of a column that keeps `vy` solid voxels
+function columnTopWorldY(vy) { return state.meta.gridBounds.min[1] + vy * state.meta.voxelResolution; }
 // bilinear interpolation of the four box-corner heights (voxel-Y units) at point (px,pz)
 function bilinearHeight(px, pz, c) {
   const w = c.x1 - c.x0, d = c.z1 - c.z0;
@@ -1067,33 +1133,41 @@ function idwHeight(px, pz, pts) {
   }
   return hsum / wsum;
 }
+// Build the column-height function the flatten controls currently describe: (px,pz) -> the
+// number of solid voxels to leave in that column. Returns {fn} or {err} with a reason it
+// can't yet. The 3D preview overlay and the actual edit both go through this, so what the
+// preview draws is exactly the surface Apply writes.
+function flattenHeightFn() {
+  if (!state.loaded) return { err: 'No file loaded.' };
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const toVY = (worldY) => (worldY - gb.min[1]) / res;
+  if (!state.flattenGradient) {
+    const targetWorldY = parseFloat(document.getElementById('flattenY').value);
+    if (isNaN(targetWorldY)) return { err: 'Set a target Y first.' };
+    const vy = Math.round(toVY(targetWorldY));
+    return { fn: () => vy };
+  }
+  if (state.flattenMode === 'box') {
+    if (!state.flattenBox) return { err: 'Drag a box first.' };
+    const b = state.flattenBox;
+    const h = ['cornerH00', 'cornerH10', 'cornerH01', 'cornerH11'].map(id => parseFloat(document.getElementById(id).value));
+    if (h.some(isNaN)) return { err: 'Set all four corner heights first (or Resample from terrain).' };
+    const c = { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1, h00: toVY(h[0]), h10: toVY(h[1]), h01: toVY(h[2]), h11: toVY(h[3]) };
+    return { fn: (px, pz) => Math.round(bilinearHeight(px, pz, c)) };
+  }
+  const poly = state.polygon;
+  if (poly.length < 3) return { err: 'Draw and finish a polygon first.' };
+  if (poly.some(p => p.h == null || isNaN(p.h))) return { err: 'Set a height for every point first (or Resample from terrain).' };
+  const pts = poly.map(p => ({ vx: p.vx, vz: p.vz, hv: toVY(p.h) }));
+  return { fn: (px, pz) => Math.round(idwHeight(px, pz, pts)) };
+}
 async function applyFlatten() {
   const bounds = flattenAreaBounds();
-  if (!bounds) { alert(state.flattenMode === 'box' ? 'Drag a box on the minimap first.' : 'Draw and finish a polygon on the minimap first.'); return; }
-  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  if (!bounds) { alert(state.flattenMode === 'box' ? 'Drag a box on the minimap or in the 3D view first.' : 'Draw and finish a polygon on the minimap or in the 3D view first.'); return; }
   const usePolygon = state.flattenMode === 'polygon';
   const poly = state.polygon;
-  const gradient = state.flattenGradient;
-  const toVY = (worldY) => (worldY - gb.min[1]) / res;
-
-  let targetVY = null, cornerVY = null, polyPts = null;
-  if (!gradient) {
-    const targetWorldY = parseFloat(document.getElementById('flattenY').value);
-    if (isNaN(targetWorldY)) { alert('Set a target Y first.'); return; }
-    targetVY = Math.round(toVY(targetWorldY));
-  } else if (!usePolygon) {
-    const b = state.flattenBox;
-    const h00 = parseFloat(document.getElementById('cornerH00').value);
-    const h10 = parseFloat(document.getElementById('cornerH10').value);
-    const h01 = parseFloat(document.getElementById('cornerH01').value);
-    const h11 = parseFloat(document.getElementById('cornerH11').value);
-    if ([h00, h10, h01, h11].some(isNaN)) { alert('Set all four corner heights first (or Resample from terrain).'); return; }
-    cornerVY = { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1, h00: toVY(h00), h10: toVY(h10), h01: toVY(h01), h11: toVY(h11) };
-  } else {
-    if (poly.length < 3) { alert('Draw and finish a polygon first.'); return; }
-    if (poly.some(p => p.h == null || isNaN(p.h))) { alert('Set a height for every point first (or Resample from terrain).'); return; }
-    polyPts = poly.map(p => ({ vx: p.vx, vz: p.vz, hv: toVY(p.h) }));
-  }
+  const { fn: heightFn, err } = flattenHeightFn();
+  if (err) { alert(err); return; }
 
   const x0 = Math.max(0, bounds.x0), x1 = Math.min(state.maxVX - 1, bounds.x1);
   const z0 = Math.max(0, bounds.z0), z1 = Math.min(state.maxVZ - 1, bounds.z1);
@@ -1105,10 +1179,7 @@ async function applyFlatten() {
   for (let x = x0; x <= x1; x++) {
     for (let z = z0; z <= z1; z++) {
       if (!usePolygon || pointInPolygon(x + 0.5, z + 0.5, poly)) {
-        let colVY;
-        if (!gradient) colVY = targetVY;
-        else if (cornerVY) colVY = Math.round(bilinearHeight(x + 0.5, z + 0.5, cornerVY));
-        else colVY = Math.round(idwHeight(x + 0.5, z + 0.5, polyPts));
+        const colVY = heightFn(x + 0.5, z + 0.5);
         for (let y = 0; y < state.maxVY; y++) setV(x, y, z, y < colVY);
       }
       done++;
@@ -1138,8 +1209,8 @@ function setFlattenMode(mode) {
   document.getElementById('flattenModePolygon').classList.toggle('active', mode === 'polygon');
   document.getElementById('polygonButtons').style.display = mode === 'polygon' ? 'grid' : 'none';
   document.getElementById('flattenHint').textContent = mode === 'box'
-    ? 'Drag a rectangle on the minimap to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.'
-    : 'Click points on the minimap to trace an outline, then "Finish shape" (or double-click). Set a target height, then Apply.';
+    ? 'Drag a rectangle on the minimap or in the 3D view to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.'
+    : 'Click points on the minimap or in the 3D view to trace an outline, then "Finish shape" (or double-click). Set a target height, then Apply.';
   updateGradientControlsVisibility();
   renderPolygonHeightList();
   drawMinimap();
@@ -1148,6 +1219,7 @@ document.getElementById('flattenModeBox').addEventListener('click', () => setFla
 document.getElementById('flattenModePolygon').addEventListener('click', () => setFlattenMode('polygon'));
 document.getElementById('finishPolygon').addEventListener('click', () => finishPolygon());
 document.getElementById('clearPolygon').addEventListener('click', () => { state.polygon = []; state.polygonHover = null; state.polygonFinished = false; renderPolygonHeightList(); drawMinimap(); });
+document.getElementById('sampleHeight').addEventListener('click', drawMinimap);
 function finishPolygon() {
   if (state.polygon.length < 3) return;
   const cx = Math.floor(state.polygon.reduce((s,p)=>s+p.vx,0) / state.polygon.length / state.leafSize);
@@ -1174,7 +1246,7 @@ function renderPolygonHeightList() {
     const input = document.createElement('input');
     input.type = 'number'; input.step = '0.1';
     input.value = p.h != null ? p.h.toFixed(2) : '';
-    input.addEventListener('input', () => { p.h = parseFloat(input.value); });
+    input.addEventListener('input', () => { p.h = parseFloat(input.value); drawMinimap(); });
     row.appendChild(label); row.appendChild(input);
     container.appendChild(row);
   });
@@ -1204,11 +1276,336 @@ document.getElementById('flattenGradient').addEventListener('change', (e) => {
   drawMinimap();
 });
 
+/* ======================================================================
+   Flatten preview in the 3D view, and the eyedropper that feeds it.
+
+   The flatten area is defined in X/Z, but the only question that actually matters
+   about it — how much does this cut, how much does it fill — does not read on a
+   top-down minimap. So the same selection is also drawn into the scene as the
+   surface Apply would leave: one quad per column (coarsened on a big area so the
+   preview stays cheap), at exactly the height flattenHeightFn() gives, tinted green
+   where it raises the ground and red where it lowers it, with the outline and a stem
+   per control point on top. The preview and the edit call the same height function,
+   so they cannot drift apart.
+
+   The area can also be drawn directly in the 3D view — dragging a box, or clicking
+   polygon points — which is the other half of the reason this exists: on sloped
+   ground you want to place corners against the terrain you can see, not against a
+   colour gradient seen from above.
+   ====================================================================== */
+const FLATTEN_PREVIEW_MAX_CELLS = 96; // per axis — a huge selection previews coarser, not slower
+const FLATTEN_FILL_COLOR = new THREE.Color(0x58c98f);  // target sits above the ground here: filling
+const FLATTEN_CUT_COLOR = new THREE.Color(0xd9705f);   // target sits below it: cutting
+const FLATTEN_LEVEL_COLOR = new THREE.Color(0x4fb8ae); // already at the target height
+// The target surface is drawn twice over the same geometry: a depth-tested pass where it
+// stands clear of the ground, and a faint pass with depth testing off underneath it. A cut
+// target is *by definition* buried inside the terrain, so a single depth-tested pass would
+// hide the preview in exactly the case you most need it; the ghost keeps the shape and its
+// colour readable through the hill while the solid pass still shows where it breaks the
+// surface. Ghost first (renderOrder 9), so the visible part gets both and reads stronger.
+const flattenFillMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false });
+const flattenFillGhostMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false, depthTest: false });
+// The outline, stems and markers ignore depth on purpose: they are the handles of a
+// selection, and a selection you can lose behind a ridge is worse than one that floats.
+const flattenLineMaterial = new THREE.LineBasicMaterial({ color: 0x7fe8de, transparent: true, opacity: 0.95, depthTest: false });
+const flattenStemMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.8, depthTest: false });
+const flattenMarkerMaterial = new THREE.MeshBasicMaterial({ color: 0x7fe8de, depthTest: false });
+let flattenOverlay = null, flattenOverlaySig = null;
+
+function disposeFlattenOverlay() {
+  if (!flattenOverlay) return;
+  const geos = new Set(), owned = new Set();
+  flattenOverlay.traverse(o => {
+    if (o.geometry) geos.add(o.geometry);
+    // sprite labels own a canvas texture + material each; every other material is shared
+    if (o.material && o.material.isSpriteMaterial) { owned.add(o.material.map); owned.add(o.material); }
+  });
+  for (const g of geos) g.dispose();
+  for (const m of owned) if (m) m.dispose();
+  scene.remove(flattenOverlay);
+  flattenOverlay = null;
+}
+// Everything the overlay's geometry depends on, as a string. The overlay is rebuilt from
+// scratch, and this is what keeps that off the hot path when nothing relevant moved —
+// drawMinimap() runs on every hover.
+function flattenOverlaySignature() {
+  if (!state.loaded || (state.tool !== 'flatten' && state.tool !== 'pick')) return 'off';
+  const parts = [state.flattenMode, state.flattenGradient ? 'g' : 'f',
+                 state.undoStack.length, state.redoStack.length, String(state.heightClip),
+                 document.getElementById('flattenY').value];
+  if (state.flattenMode === 'box') {
+    const b = state.flattenBox;
+    parts.push(b ? [b.x0, b.z0, b.x1, b.z1].join(',') : '-');
+    parts.push(['cornerH00', 'cornerH10', 'cornerH01', 'cornerH11'].map(id => document.getElementById(id).value).join(','));
+  } else {
+    parts.push(state.polygon.map(pt => pt.vx + ',' + pt.vz + ',' + pt.h).join(';'));
+    parts.push(state.polygonFinished ? '1' : '0');
+    parts.push(state.polygonHover ? state.polygonHover.vx + ',' + state.polygonHover.vz : '-');
+  }
+  return parts.join('|');
+}
+function updateFlattenOverlay() {
+  const sig = flattenOverlaySignature();
+  if (sig === flattenOverlaySig) return;
+  flattenOverlaySig = sig;
+  disposeFlattenOverlay();
+  if (sig !== 'off') buildFlattenOverlay();
+}
+// Green where the target sits above the current ground, red where it sits below, saturating
+// over ~24 voxels of difference so a big cut is obvious without needing a legend.
+function cutFillColor(targetVY, currentVY) {
+  if (currentVY == null) return FLATTEN_FILL_COLOR.clone();
+  const d = targetVY - currentVY;
+  if (Math.abs(d) < 1) return FLATTEN_LEVEL_COLOR.clone();
+  const t = Math.min(1, Math.abs(d) / 24);
+  return FLATTEN_LEVEL_COLOR.clone().lerp(d > 0 ? FLATTEN_FILL_COLOR : FLATTEN_CUT_COLOR, 0.35 + 0.65 * t);
+}
+function markerLabelSprite(text, worldSize) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(12,15,18,0.85)';
+  g.beginPath(); g.arc(32, 32, 27, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = '#7fe8de'; g.lineWidth = 3; g.stroke();
+  g.fillStyle = '#dce8e6'; g.font = 'bold 30px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 32, 34);
+  const tex = new THREE.CanvasTexture(c);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sprite.scale.set(worldSize, worldSize, worldSize);
+  return sprite;
+}
+function buildFlattenOverlay() {
+  const poly = state.polygon;
+  const isPoly = state.flattenMode === 'polygon';
+  const bounds = flattenAreaBounds();
+  const hasOutline = isPoly ? poly.length > 0 : !!state.flattenBox;
+  if (!bounds && !hasOutline) return;
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const heightFn = flattenHeightFn().fn; // undefined while the controls are still incomplete
+  const wx = (vx) => gb.min[0] + vx * res;
+  const wz = (vz) => gb.min[2] + vz * res;
+  // Height of the preview surface at a point, falling back to the terrain itself so an
+  // incomplete gradient still draws its outline somewhere sensible instead of down at y=0.
+  const surfaceY = (px, pz) => {
+    if (heightFn) return columnTopWorldY(heightFn(px, pz));
+    const cur = sampleHeightVY(px, pz);
+    return columnTopWorldY(cur != null ? cur : 0);
+  };
+  const group = new THREE.Group();
+
+  /* ---- the target surface itself, one quad per (possibly coarsened) column ---- */
+  if (bounds && heightFn) {
+    const x0 = Math.max(0, bounds.x0), x1 = Math.min(state.maxVX - 1, bounds.x1);
+    const z0 = Math.max(0, bounds.z0), z1 = Math.min(state.maxVZ - 1, bounds.z1);
+    const step = Math.max(1, Math.ceil(Math.max(x1 - x0 + 1, z1 - z0 + 1) / FLATTEN_PREVIEW_MAX_CELLS));
+    const pos = [], col = [];
+    for (let x = x0; x <= x1; x += step) {
+      for (let z = z0; z <= z1; z += step) {
+        const cx = x + step / 2, cz = z + step / 2;
+        // the same inside test, at the same cell centres, that applyFlatten uses per column
+        if (isPoly && !pointInPolygon(cx, cz, poly)) continue;
+        const vy = heightFn(cx, cz);
+        const y = columnTopWorldY(vy);
+        const c = cutFillColor(vy, sampleHeightVY(cx, cz));
+        const ax = wx(x), bx = wx(Math.min(x1 + 1, x + step));
+        const az = wz(z), bz = wz(Math.min(z1 + 1, z + step));
+        for (const q of [[ax, az], [bx, az], [bx, bz], [ax, az], [bx, bz], [ax, bz]]) {
+          pos.push(q[0], y, q[1]); col.push(c.r, c.g, c.b);
+        }
+      }
+    }
+    if (pos.length) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+      const ghost = new THREE.Mesh(geo, flattenFillGhostMaterial);
+      ghost.renderOrder = 9;
+      group.add(ghost);
+      const mesh = new THREE.Mesh(geo, flattenFillMaterial);
+      mesh.renderOrder = 10;
+      group.add(mesh);
+    }
+  }
+
+  /* ---- outline: the box edges, or the polygon so far plus the rubber band to the cursor ---- */
+  const ring = [];
+  let closed = false;
+  if (!isPoly) {
+    if (state.flattenBox) {
+      const b = state.flattenBox;
+      ring.push([b.x0, b.z0], [b.x1 + 1, b.z0], [b.x1 + 1, b.z1 + 1], [b.x0, b.z1 + 1]);
+      closed = true;
+    }
+  } else {
+    for (const pt of poly) ring.push([pt.vx, pt.vz]);
+    if (state.polygonHover && !state.polygonFinished) ring.push([state.polygonHover.vx, state.polygonHover.vz]);
+    closed = state.polygonFinished;
+  }
+  if (ring.length >= 2) {
+    const lp = [];
+    const segCount = closed ? ring.length : ring.length - 1;
+    for (let i = 0; i < segCount; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      // subdivided so an edge over a gradient follows the sloped surface instead of cutting under it
+      const n = Math.max(1, Math.min(32, Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) / 4)));
+      for (let k = 0; k < n; k++) {
+        for (const t of [k / n, (k + 1) / n]) {
+          const px = a[0] + (b[0] - a[0]) * t, pz = a[1] + (b[1] - a[1]) * t;
+          lp.push(wx(px), surfaceY(px, pz) + res * 0.05, wz(pz));
+        }
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(lp, 3));
+    const line = new THREE.LineSegments(geo, flattenLineMaterial);
+    line.renderOrder = 11;
+    group.add(line);
+  }
+
+  /* ---- control points: a marker at the target height, and a stem down to the ground it moves ---- */
+  const markers = [];
+  if (!isPoly) {
+    if (state.flattenBox) {
+      const b = state.flattenBox;
+      markers.push([b.x0, b.z0], [b.x1 + 1, b.z0], [b.x0, b.z1 + 1], [b.x1 + 1, b.z1 + 1]);
+    }
+  } else {
+    for (const pt of poly) markers.push([pt.vx, pt.vz]);
+  }
+  if (markers.length) {
+    const markerGeo = new THREE.OctahedronGeometry(res * 0.9);
+    const stemPos = [], stemCol = [];
+    const cornerNames = ['-X-Z', '+X-Z', '-X+Z', '+X+Z'];
+    markers.forEach((m, i) => {
+      const px = m[0], pz = m[1];
+      const target = surfaceY(px, pz);
+      const curVY = sampleHeightVY(px, pz);
+      const ground = columnTopWorldY(curVY != null ? curVY : 0);
+      const c = cutFillColor(heightFn ? heightFn(px, pz) : (curVY != null ? curVY : 0), curVY);
+      stemPos.push(wx(px), ground, wz(pz), wx(px), target, wz(pz));
+      stemCol.push(c.r, c.g, c.b, c.r, c.g, c.b);
+      const dot = new THREE.Mesh(markerGeo, flattenMarkerMaterial);
+      dot.position.set(wx(px), target, wz(pz));
+      dot.renderOrder = 12;
+      group.add(dot);
+      // numbered only in gradient mode, where the number is how you find this point's box in the panel
+      if (state.flattenGradient) {
+        const label = markerLabelSprite(isPoly ? String(i + 1) : cornerNames[i], res * 3);
+        label.position.set(wx(px), target + res * 3, wz(pz));
+        label.renderOrder = 13;
+        group.add(label);
+      }
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(stemPos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(stemCol, 3));
+    const stems = new THREE.LineSegments(geo, flattenStemMaterial);
+    stems.renderOrder = 11;
+    group.add(stems);
+  }
+
+  flattenOverlay = group;
+  scene.add(group);
+}
+
+/* ---- picking points and heights off the 3D view ---- */
+// Where the cursor hits the voxel surface, as the column under it plus the world Y of the
+// top of the solid voxel it landed on — which is exactly the "target Y" that would leave
+// that voxel as the new surface. Falls back to a horizontal plane through the focus point
+// when the ray misses everything, so a drag can still run off the edge of the terrain.
+function surfacePointAt(clientX, clientY) {
+  if (!state.loaded) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const mouse = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera);
+  const targets = state.overviewMode ? (overviewMesh ? [overviewMesh] : []) : chunkGroup.children;
+  const hits = raycaster.intersectObjects(targets, false);
+  const res = state.meta.voxelResolution;
+  let point, normal = null;
+  if (hits.length) { point = hits[0].point.clone(); normal = hits[0].face.normal; }
+  else {
+    point = new THREE.Vector3();
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -state.focus.y);
+    if (!raycaster.ray.intersectPlane(plane, point)) return null;
+  }
+  // Step just inside the surface, so the column picked is the one under the cursor rather
+  // than the empty voxel in front of the face (the same offset the brush uses).
+  const inside = normal ? point.clone().addScaledVector(normal, -res * 0.5) : point;
+  const v = worldToVoxel(inside.x, inside.y, inside.z);
+  // clamp into the grid: a drag (or the plane fallback) can easily run off the edge of it,
+  // and every caller wants a column that actually exists
+  const cl = (n, hi) => Math.max(0, Math.min(hi - 1, n));
+  return { vx: cl(v[0], state.maxVX), vz: cl(v[2], state.maxVZ), point,
+           topWorldY: state.meta.gridBounds.min[1] + (v[1] + 1) * res };
+}
+function setPickHint(msg) {
+  const el = document.getElementById('pickHint');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function hidePickHint() { document.getElementById('pickHint').style.display = 'none'; }
+// Route a picked height into whichever control the flatten tool is currently reading: the flat
+// target, or — in gradient mode — the nearest corner / polygon point to where you clicked.
+function applyPickedHeight(vx, vz, worldY) {
+  const val = worldY.toFixed(2);
+  if (!state.flattenGradient) {
+    document.getElementById('flattenY').value = val;
+    selectTool('flatten'); // picking the base height is the whole job — hand the tool straight back
+    setPickHint('Target Y set to ' + val + '.');
+  } else if (state.flattenMode === 'box') {
+    if (!state.flattenBox) { setPickHint('Drag a box first, then pick a height for a corner.'); return; }
+    const b = state.flattenBox;
+    const corners = [['cornerH00', b.x0, b.z0, '-X -Z'], ['cornerH10', b.x1, b.z0, '+X -Z'],
+                     ['cornerH01', b.x0, b.z1, '-X +Z'], ['cornerH11', b.x1, b.z1, '+X +Z']];
+    let best = corners[0], bestD = Infinity;
+    for (const c of corners) {
+      const d = (c[1] - vx) * (c[1] - vx) + (c[2] - vz) * (c[2] - vz);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    document.getElementById(best[0]).value = val;
+    setPickHint('Corner ' + best[3] + ' set to ' + val + '. Still picking — press 3 or Esc when done.');
+  } else {
+    if (!state.polygon.length) { setPickHint('Draw a polygon first, then pick a height for a point.'); return; }
+    let bestI = 0, bestD = Infinity;
+    state.polygon.forEach((pt, i) => {
+      const d = (pt.vx - vx) * (pt.vx - vx) + (pt.vz - vz) * (pt.vz - vz);
+      if (d < bestD) { bestD = d; bestI = i; }
+    });
+    state.polygon[bestI].h = worldY;
+    renderPolygonHeightList();
+    setPickHint('Point P' + (bestI + 1) + ' set to ' + val + '. Still picking — press 3 or Esc when done.');
+  }
+  drawMinimap();
+}
+// add a point to the polygon; worldY = the height picked in 3D, or null to sample the terrain
+function addPolygonPoint(vx, vz, worldY) {
+  if (state.polygonFinished) { state.polygon = []; state.polygonFinished = false; } // a click after finishing starts a fresh shape
+  let h = worldY;
+  if (h == null) {
+    const sampled = sampleHeightWorldY(vx, vz);
+    h = sampled != null ? sampled : parseFloat(document.getElementById('flattenY').value) || 0;
+  }
+  state.polygon.push({ vx, vz, h });
+  state.polygonHover = null;
+  if (state.flattenGradient) renderPolygonHeightList();
+  drawMinimap();
+}
+// seed the flat target (and the gradient corners) from the terrain under a freshly dragged box
+function seedFlattenHeightsFromBox() {
+  if (!state.flattenBox) return;
+  const b = state.flattenBox;
+  const h = sampleHeightWorldY((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2);
+  if (h != null) document.getElementById('flattenY').value = h.toFixed(2);
+  if (state.flattenGradient) resampleGradientHeights();
+}
+
 /* ---- minimap ---- */
 const mmCanvas = document.getElementById('minimap');
 const mmWrap = document.getElementById('minimapWrap');
 const mmCtx = mmCanvas.getContext('2d');
 let mmImageData = null;
+// Repaints the minimap AND the 3D flatten preview (see the updateFlattenOverlay() call at the
+// tail) — they show the same selection, so they are always refreshed together and can't disagree.
 function drawMinimap() {
   if (!state.heightMap || !state.mmView) return;
   const nbx = state.nbx, nbz = state.nbz;
@@ -1264,6 +1661,7 @@ function drawMinimap() {
       if (state.flattenGradient) { mmCtx.fillStyle = '#dce8e6'; mmCtx.font = '10px sans-serif'; mmCtx.fillText(String(i+1), x+5, y-5); }
     });
   }
+  updateFlattenOverlay();
 }
 
 function mmVoxelFromEvent(e) {
@@ -1297,6 +1695,12 @@ mmCanvas.addEventListener('pointerdown', (e) => {
   if (!state.loaded) return;
   const { vx, vz } = mmVoxelFromEvent(e);
   state.lastMinimapClick = { vx, vz };
+  if (state.tool === 'pick') {
+    const h = sampleHeightWorldY(vx, vz);
+    if (h == null) { setPickHint('That column is empty — nothing to sample.'); return; }
+    applyPickedHeight(vx, vz, h);
+    return;
+  }
   if (state.tool === 'flatten' && state.flattenMode === 'polygon') return; // point adding is handled by 'click' below (needs e.detail to tell single vs double clicks apart)
   if (state.tool === 'flatten' && state.flattenMode === 'box') {
     mmDragStart = { vx, vz };
@@ -1310,11 +1714,7 @@ mmCanvas.addEventListener('click', (e) => {
   if (!(state.tool === 'flatten' && state.flattenMode === 'polygon')) return;
   const { vx, vz } = mmVoxelFromEvent(e);
   if (e.detail >= 2) return; // the 'dblclick' handler below finishes the shape; ignore the 2nd click here so it doesn't also add a point
-  if (state.polygonFinished) { state.polygon = []; state.polygonFinished = false; } // a click after finishing starts a fresh shape
-  const sampled = sampleHeightWorldY(vx, vz);
-  state.polygon.push({ vx, vz, h: sampled != null ? sampled : parseFloat(document.getElementById('flattenY').value) || 0 });
-  if (state.flattenGradient) renderPolygonHeightList();
-  drawMinimap();
+  addPolygonPoint(vx, vz, null); // no 3D pick behind this one — sample the terrain for its height
 });
 mmCanvas.addEventListener('pointermove', (e) => {
   if (state.tool === 'flatten' && state.flattenMode === 'polygon' && state.polygon.length > 0 && !state.polygonFinished) {
@@ -1346,12 +1746,8 @@ window.addEventListener('pointerup', (e) => {
       const fy = h>=0 ? h+8 : Math.floor(state.maxVY/2);
       state.focus.copy(voxelToWorld(mmDragStart.vx, fy, mmDragStart.vz));
     }
-  } else if (state.flattenMode === 'box' && state.flattenBox) {
-    const cx = Math.floor((state.flattenBox.x0+state.flattenBox.x1)/2/state.leafSize);
-    const cz = Math.floor((state.flattenBox.z0+state.flattenBox.z1)/2/state.leafSize);
-    const h = cx>=0&&cz>=0&&cx<state.nbx&&cz<state.nbz ? state.heightMap[cx*state.nbz+cz] : -1;
-    if (h>=0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h+1)*state.meta.voxelResolution).toFixed(2);
-    if (state.flattenGradient) resampleGradientHeights();
+  } else if (state.flattenMode === 'box') {
+    seedFlattenHeightsFromBox();
   }
   mmDragStart = null;
   drawMinimap();
@@ -1394,6 +1790,7 @@ window.addEventListener('resize', () => { if (mmFullscreen) { sizeMinimapCanvas(
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') {
     if (mmFullscreen) setMinimapFullscreen(false);
+    else if (state.tool === 'pick') selectTool('flatten');
     else if (state.polygon.length > 0) { state.polygon = []; state.polygonHover = null; drawMinimap(); }
   }
 });
@@ -1401,14 +1798,32 @@ window.addEventListener('keydown', (e) => {
 /* ---- tool selection UI ---- */
 function selectTool(name) {
   state.tool = name;
-  for (const id of ['toolAdd','toolRemove','toolFlatten','toolOrbit']) document.getElementById(id).classList.remove('active');
-  const map = { add:'toolAdd', remove:'toolRemove', flatten:'toolFlatten', orbit:'toolOrbit' };
+  for (const id of ['toolAdd','toolRemove','toolFlatten','toolOrbit','toolPick']) document.getElementById(id).classList.remove('active');
+  const map = { add:'toolAdd', remove:'toolRemove', flatten:'toolFlatten', orbit:'toolOrbit', pick:'toolPick' };
   document.getElementById(map[name]).classList.add('active');
+  if (renderer) renderer.domElement.style.cursor = (name === 'flatten' || name === 'pick') ? 'crosshair' : 'default';
+  if (name === 'pick') {
+    setPickHint(state.flattenGradient
+      ? 'Click the terrain (3D view or minimap) to set the nearest ' + (state.flattenMode === 'box' ? 'box corner' : 'polygon point') + '. Stays active for several picks — press 3 or Esc when done.'
+      : 'Click the terrain (3D view or minimap) to set the flatten target height.');
+  } else {
+    // leaving the picker drops its instructions; a pick that *succeeded* re-shows its own
+    // confirmation right after this call (see applyPickedHeight), so that one survives
+    hidePickHint();
+  }
+  drawMinimap(); // the 3D preview only shows while a flatten tool is active
 }
 document.getElementById('toolAdd').addEventListener('click', () => selectTool('add'));
 document.getElementById('toolRemove').addEventListener('click', () => selectTool('remove'));
 document.getElementById('toolFlatten').addEventListener('click', () => selectTool('flatten'));
 document.getElementById('toolOrbit').addEventListener('click', () => selectTool('orbit'));
+document.getElementById('toolPick').addEventListener('click', () => selectTool('pick'));
+document.getElementById('pickHeightBtn').addEventListener('click', () => selectTool('pick'));
+document.getElementById('pickHeightBtnGrad').addEventListener('click', () => selectTool('pick'));
+// the preview surface is built from these numbers, so it has to follow them as they're typed
+for (const id of ['flattenY', 'cornerH00', 'cornerH10', 'cornerH01', 'cornerH11']) {
+  document.getElementById(id).addEventListener('input', drawMinimap);
+}
 document.getElementById('brushWidth').addEventListener('input', (e) => { state.brushWidth = parseInt(e.target.value); document.getElementById('brushWidthVal').textContent = e.target.value; });
 document.getElementById('brushHeight').addEventListener('input', (e) => { state.brushHeight = parseInt(e.target.value); document.getElementById('brushHeightVal').textContent = e.target.value; });
 document.getElementById('brushShape').addEventListener('change', (e) => state.brushShape = e.target.value);

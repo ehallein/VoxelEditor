@@ -116,8 +116,56 @@ Search for these comment headers in the file:
   voxel, so `D=1` is exactly one voxel. Sphere shape uses an ellipsoid test
   with the width/height as separate semi-axes when they differ.
 - **Flatten (`applyFlatten`)**: box or polygon (even-odd point-in-polygon
-  test) area selection on the minimap; runs in batches (`await
-  nextTick()`) so it doesn't freeze the tab on a big selection.
+  test) area selection, drawn either on the minimap or directly in the 3D
+  view; runs in batches (`await nextTick()`) so it doesn't freeze the tab
+  on a big selection. The column height it writes comes from
+  **`flattenHeightFn()`** — one function that reads the current controls
+  (flat target Y, bilinear box corners, or IDW over polygon vertices) and
+  returns `(px,pz) -> target column height in voxels`, or an error string
+  saying which control is still missing. The 3D preview calls the same
+  function, which is the whole point of extracting it: the preview cannot
+  promise a surface the edit then doesn't write.
+- **Flatten preview in 3D (`buildFlattenOverlay`)**: the selection is drawn
+  into the scene as the surface Apply would leave — one quad per column,
+  at the height `flattenHeightFn()` gives, tinted **green where it fills**
+  and **red where it cuts** (`cutFillColor`, saturating over ~24 voxels of
+  difference), plus the outline, a marker per control point and a stem from
+  the current ground up/down to the target. The cell grid is coarsened by an
+  integer step so a whole-grid selection is ~4k quads and ~1.5 ms to build,
+  not 16k columns; cell centres are tested with the *same* `pointInPolygon`
+  call `applyFlatten` uses, so the preview's edge is the real edge.
+  - **The fill is drawn twice over the same geometry**: a depth-tested pass,
+    and a much fainter `depthTest: false` ghost underneath it. A *cut*
+    target is by definition buried inside the terrain, so a single
+    depth-tested pass would hide the preview in exactly the case you most
+    need it. The outline, stems and markers ignore depth outright — they're
+    the handles of a selection, and a handle you can lose behind a ridge is
+    worse than one that floats.
+  - Rebuilt from scratch on any change, guarded by
+    `flattenOverlaySignature()` — a string of everything the geometry
+    depends on. Without it the rebuild would run on every hover, because
+    `drawMinimap()` is what refreshes both views (it calls
+    `updateFlattenOverlay()` at its tail, so the minimap and the 3D preview
+    can't disagree about what's selected).
+- **Drawing the area in the 3D view**: with the flatten tool active the left
+  button draws instead of orbiting (right-drag still orbits) — drag a box,
+  or click polygon points with a live rubber band, double-click to finish,
+  exactly mirroring the minimap's bindings. Points land via
+  `surfacePointAt()`, which raycasts the streamed chunks (or the overview
+  mesh, so you can grab a large area from the whole-model view), steps
+  `-normal * res/2` to get the column *under* the cursor rather than the
+  empty voxel in front of the face, and clamps into the grid. A polygon
+  point clicked in 3D takes the height you actually clicked, not a
+  resampled one.
+- **Eyedropper (tool 5, `applyPickedHeight`)**: clicking the terrain — in 3D
+  or on the minimap — sets the flatten height from the top of the voxel you
+  hit. Which control it feeds depends on the mode: with gradient off it sets
+  Target Y and hands the tool straight back to flatten (single-shot, that
+  being the whole job); with gradient on it sets the *nearest* box corner or
+  polygon point and stays active so you can walk round the shape. This is
+  the answer to "what number do I put in Target Y" for the no-gradient case,
+  where there is otherwise nothing to sample against but the minimap's
+  colour ramp.
 - **Minimap**: `state.mmView` is the current zoom/pan window in voxel
   coordinates (wheel zooms toward the cursor); `state.flattenBox` /
   `state.polygon` are drawn in that same transformed space via
@@ -225,7 +273,14 @@ the source `.ply` puts both in the same world space at once.
 - **Flatten on a very large area is still just a per-voxel loop** (batched
   to avoid freezing the tab, but not accelerated). Fine for the areas it
   was tried against; a big flatten across the whole grid could take a
-  while.
+  while. The 3D *preview* of that same area is cheap (it's capped at
+  `FLATTEN_PREVIEW_MAX_CELLS` per axis), so the preview being instant says
+  nothing about how long Apply will take.
+- **The flatten preview's cut/fill tint is only leaf-block accurate.** It
+  compares against `state.heightMap`, which is one height per 4x4x4 block
+  column, so the colour can be a voxel or two off right at a boundary —
+  visible as a thin mis-tinted fringe along the edge of a finished flatten.
+  The *height* of the previewed surface is exact; only the tint is coarse.
 - **The brush's "add" never respects the height clip** — you can paint
   above the clip plane and it'll just be invisible until you raise the
   clip again. This is intentional (view-only clip) but worth knowing.
