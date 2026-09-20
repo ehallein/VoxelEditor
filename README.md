@@ -294,8 +294,8 @@ the source `.ply` puts both in the same world space at once.
 ### WebXR preview (`PART 7`)
 
 "Enter VR" (top-right of the 3D view) shows the *same* scene — voxels,
-splats, flatten overlay — on a headset. Preview only: no editing in VR,
-and the desktop view keeps running on the mirrored canvas.
+splats, flatten overlay — on a headset, and edits it with the same tools.
+The desktop view keeps running on the mirrored canvas.
 
 - **The camera belongs to the headset in a session**, so the viewpoint is
   placed by a rig (`xrRig`) that `camera` is parented to. Outside a
@@ -329,6 +329,47 @@ and the desktop view keeps running on the mirrored canvas.
   the alt-click that deletes it; X and Y on the left controller
   are undo and redo, because a mis-aimed stroke in a headset has no
   keyboard to take it back with.
+- **The controls ride on the left hand** (`xrPanel`): a dial floating
+  above the left controller with the five tools and the flatten **Apply**
+  spaced evenly around its ring, the active one lit in its own colour and
+  named in the hub. You work it with the *right* controller's ray and
+  trigger —
+  the same ray and trigger the tools use, so a press that lands on a
+  button is swallowed there (`xrPtr.panel`) instead of reaching the
+  terrain behind it, and while the ray rests on the dial the world cursor
+  goes away and the ray stops at the button. It is built in
+  controller-local metres, so the A/B rescale cannot grow or shrink it,
+  and drawn with `depthTest` off, because a menu buried in the hillside
+  you are standing in is no menu. Icons are canvas textures drawn as white
+  strokes on nothing, so one material colour tints each one: grey at rest,
+  the tool's colour when active. **Apply** does in the hub what the
+  sidebar does in dialogs — `applyFlatten`'s failure modes are `alert()`s,
+  which nobody can see in a headset, so the dial pre-checks
+  `flattenAreaBounds`/`flattenHeightFn` and answers on the hub instead
+  ("Draw a shape first"); an unfinished polygon is closed first, since
+  that is what Apply means while you are still tracing one.
+- **What the dial carries beyond the ring follows the active tool**, since
+  there is no room for everything at once and no use for it either. With
+  **flatten** up, the hub's second line *is* the box/polygon switch — a
+  pill with swap arrows around the mode, pressed like any other button —
+  because the mode belongs under the tool's name and there is no seventh
+  seat on the ring for it. With **add/erase** up, a drawer under the ring
+  carries a ± pair per brush diameter; holding the trigger repeats and
+  accelerates (1 → up to 6 per step), because 1 to 48 voxels is a long way
+  at one press a time, and sliding the ray off the button stops the run
+  without letting go. Both diameters go through one `setBrushSize`, which
+  the sidebar sliders now call too — two writers, one place, so the dial
+  and the sliders cannot drift apart. Raycasting ignores `visible`, so the
+  hit list (`xrPanel.targets`) is rebuilt per frame from what is actually
+  on the dial rather than filtered afterwards. The flatten drawer carries
+  the **Gradient** switch, which goes through `setFlattenGradient` — the
+  same one the sidebar checkbox now calls, and it still seeds the corner
+  and vertex heights off the terrain when it turns on, so gradient in a
+  headset is one press rather than a row of blanks to type into.
+- **Exit VR is on the dial too**, in a pill above the ring and on every
+  tool, because a headset whose only way back to the desk is the system
+  menu is a trap: it ends the session (`session.end()`), which runs the
+  same `endXRSession` hand-back as the button on the page.
 - **Closing a polygon is its own gesture in VR**: aim at the first or the
   last marker and pull. A double-click is the one thing a hand cannot do —
   the aim wanders between the two pulls, and worse, the second pull lands

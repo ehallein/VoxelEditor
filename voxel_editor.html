@@ -1520,16 +1520,21 @@ function resampleGradientHeights() {
   }
 }
 document.getElementById('resampleGradient').addEventListener('click', resampleGradientHeights);
-document.getElementById('flattenGradient').addEventListener('change', (e) => {
-  state.flattenGradient = e.target.checked;
+// One setter, two writers: this checkbox and the VR dial's Gradient row (PART 7).
+function setFlattenGradient(on) {
+  state.flattenGradient = !!on;
+  document.getElementById('flattenGradient').checked = state.flattenGradient;
   document.getElementById('flattenFlatControls').style.display = state.flattenGradient ? 'none' : 'flex';
   document.getElementById('flattenGradientControls').style.display = state.flattenGradient ? 'flex' : 'none';
   document.getElementById('gradientHint').style.display = state.flattenGradient ? 'block' : 'none';
   updateGradientControlsVisibility();
+  // turning it on with nothing to interpolate from is a row of blanks, so seed the
+  // corner/vertex heights off the terrain that is already there
   if (state.flattenGradient) resampleGradientHeights();
   renderPolygonPointList();
   drawMinimap();
-});
+}
+document.getElementById('flattenGradient').addEventListener('change', (e) => setFlattenGradient(e.target.checked));
 
 /* ======================================================================
    Flatten preview in the 3D view, and the eyedropper that feeds it.
@@ -2124,8 +2129,19 @@ document.getElementById('pickHeightBtnGrad').addEventListener('click', () => sel
 for (const id of ['flattenY', 'cornerH00', 'cornerH10', 'cornerH01', 'cornerH11']) {
   document.getElementById(id).addEventListener('input', drawMinimap);
 }
-document.getElementById('brushWidth').addEventListener('input', (e) => { state.brushWidth = parseInt(e.target.value); document.getElementById('brushWidthVal').textContent = e.target.value; });
-document.getElementById('brushHeight').addEventListener('input', (e) => { state.brushHeight = parseInt(e.target.value); document.getElementById('brushHeightVal').textContent = e.target.value; });
+// The brush diameters live in one setter because two things now write them: these
+// sliders, and the ± buttons on the VR dial (PART 7), which has no sliders to drag.
+function setBrushSize(dim, v) {
+  const id = dim === 'w' ? 'brushWidth' : 'brushHeight';
+  const el = document.getElementById(id);
+  v = Math.max(parseInt(el.min), Math.min(parseInt(el.max), Math.round(v)));
+  if (dim === 'w') state.brushWidth = v; else state.brushHeight = v;
+  el.value = v;
+  document.getElementById(id + 'Val').textContent = v;
+  return v;
+}
+document.getElementById('brushWidth').addEventListener('input', (e) => setBrushSize('w', parseInt(e.target.value)));
+document.getElementById('brushHeight').addEventListener('input', (e) => setBrushSize('h', parseInt(e.target.value)));
 document.getElementById('brushShape').addEventListener('change', (e) => state.brushShape = e.target.value);
 document.getElementById('renderRadius').addEventListener('input', (e) => { document.getElementById('renderRadiusVal').textContent = e.target.value; markDirtyAll(); });
 document.getElementById('toggleOverview').addEventListener('click', () => setOverviewMode(!state.overviewMode));
@@ -2922,8 +2938,13 @@ function initSplats() {
 /* ======================================================================
    PART 7 — WebXR preview
 
-   Preview only: the headset shows the same scene the desktop view draws,
-   with no editing in it. Everything that moves the viewpoint moves
+   The headset shows the same scene the desktop view draws, and edits it:
+   the tools come along on a dial strapped to the left controller (see
+   xrPanel) because there is no sidebar to click in here — the ring of
+   tools, the flatten box/polygon switch in its hub, and ± for the brush
+   diameters under it — and the right controller's ray both points the
+   tools and works the dial.
+   Everything that moves the viewpoint moves
    `xrRig` (see PART 4) — the camera itself belongs to the headset.
 
    The rig also carries the world scale, which defaults to 1: the source
@@ -2949,7 +2970,7 @@ const xr = {
 };
 // mouse-button state for the controllers: which hand holds the trigger, and what that
 // press started (a stroke, a flatten box, a polygon point waiting on the release)
-const xrPtr = { hand: -1, stroke: false, box: null, polyPending: false };
+const xrPtr = { hand: -1, stroke: false, box: null, polyPending: false, panel: false };
 const XR_RAY_LEN = 1.5;   // metres of ray drawn when it is not pointing at anything
 const _XR_UP = new THREE.Vector3(0, 1, 0);
 const _xrFwd = new THREE.Vector3(), _xrRight = new THREE.Vector3(), _xrHead = new THREE.Vector3();
@@ -2978,10 +2999,12 @@ async function initXR() {
   try { ok = await navigator.xr.isSessionSupported('immersive-vr'); } catch (e) { ok = false; }
   if (!ok) return;
   btn.style.display = '';
-  btn.title = 'Trigger: use the current tool where the ray lands (on a polygon, trigger the ' +
-              'first or last marker to close it) · Grip: sprint, and the alt-click that deletes ' +
-              'a polygon point · Left stick: move · Right stick: turn / up-down · ' +
-              'A,B: world scale · X,Y: undo, redo';
+  btn.title = 'Tool dial on the left controller — point at it with the right one and pull the ' +
+              'trigger to switch tools, swap box/polygon in its hub, toggle gradient, resize ' +
+              'the brush, apply a flatten or leave the session · Trigger: use the current tool where ' +
+              'the ray lands (on a polygon, trigger the first or last marker to close it) · ' +
+              'Grip: sprint, and the alt-click that deletes a polygon point · Left stick: move · ' +
+              'Right stick: turn / up-down · A,B: world scale · X,Y: undo, redo';
   btn.addEventListener('click', () => {
     if (renderer.xr.isPresenting) { const s = renderer.xr.getSession(); if (s) s.end(); return; }
     navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] })
@@ -3007,6 +3030,515 @@ async function initXR() {
   xr.cursor.renderOrder = 999;
   xr.cursor.visible = false;
   scene.add(xr.cursor);
+  xrPanelInit();
+}
+
+/* ---- the tool dial on the left hand ----
+   In here there is no sidebar to click, so the controls come along on the left
+   controller: a dial floating above it with the tools spaced evenly around its ring and
+   the flatten Apply among them, the current tool named in the hub, and — below the ring —
+   whatever that tool needs to be set. You work it by pointing the *right* controller's
+   ray at it and pulling the trigger: the same ray and the same trigger the tools
+   themselves use, which is why a press that lands on the dial is swallowed here
+   (xrPtr.panel) instead of reaching the terrain behind it.
+
+   What is on it beyond the ring is per tool, because there is no room for everything at
+   once and no use for it either:
+     flatten     the hub itself becomes the box/polygon switch, and a drawer under the
+                 ring carries the gradient toggle
+     add/remove  a drawer under the ring with ± for each brush diameter
+   Above the ring, on every tool, is the way out of the session — a headset with no way
+   back to the desk but its own system menu is a trap.
+
+   Everything is built in controller-local metres, so it keeps its real-world size as the
+   A/B rescale grows or shrinks the world, and it is drawn with depthTest off — a menu
+   buried in the hillside you are standing in would be no menu at all. */
+const xrPanel = {
+  group: null, drawer: null, flatDrawer: null, grad: null, exit: null,
+  hub: null, buttons: [], brush: [], targets: [],
+  hover: null, hoverDist: 0, applying: false, aimIdx: -1, repeat: null,
+  hubText: '', msg: '', msgUntil: 0,
+};
+// metres, on the controller: six 40 mm buttons on a 96 mm ring, inside a 148 mm plate.
+// The icon canvas is drawn to fit the button's own circle, so it is the same size as it.
+const XR_PANEL = { plate: 0.074, ring: 0.048, btn: 0.0200, icon: 0.0392, step: 0.0115 };
+const XR_PANEL_IDLE = 0x161e28, XR_PANEL_HOVER = 0x3b5166;
+
+/* ---- icons ----
+   Drawn once each into a small canvas as white strokes on nothing, so the material's
+   colour can tint them: grey at rest, the tool's own colour when it is the active one. */
+function xrCube(ctx, cx, cy, s) {
+  // the iso projection of a unit cube: a hexagon, plus the three edges meeting at the
+  // near-top corner in the middle of it
+  const P = (dx, dy) => [cx + dx * s, cy + dy * s];
+  const top = P(0, -1), ur = P(0.87, -0.5), lr = P(0.87, 0.5);
+  const bot = P(0, 1), ll = P(-0.87, 0.5), ul = P(-0.87, -0.5), mid = P(0, 0);
+  ctx.beginPath();
+  ctx.moveTo(top[0], top[1]); ctx.lineTo(ur[0], ur[1]); ctx.lineTo(lr[0], lr[1]);
+  ctx.lineTo(bot[0], bot[1]); ctx.lineTo(ll[0], ll[1]); ctx.lineTo(ul[0], ul[1]);
+  ctx.closePath();
+  ctx.moveTo(mid[0], mid[1]); ctx.lineTo(ul[0], ul[1]);
+  ctx.moveTo(mid[0], mid[1]); ctx.lineTo(ur[0], ur[1]);
+  ctx.moveTo(mid[0], mid[1]); ctx.lineTo(bot[0], bot[1]);
+  ctx.stroke();
+}
+function xrIconAdd(ctx) {
+  xrCube(ctx, 52, 44, 24);
+  ctx.beginPath(); ctx.moveTo(85, 74); ctx.lineTo(111, 74); ctx.moveTo(98, 61); ctx.lineTo(98, 87); ctx.stroke();
+}
+function xrIconRemove(ctx) {
+  xrCube(ctx, 52, 44, 24);
+  ctx.beginPath(); ctx.moveTo(85, 74); ctx.lineTo(111, 74); ctx.stroke();
+}
+function xrIconFlatten(ctx) {
+  // the ground as it is, and the level Apply would leave it at
+  ctx.beginPath();
+  ctx.moveTo(20, 76); ctx.lineTo(40, 48); ctx.lineTo(56, 64); ctx.lineTo(76, 30); ctx.lineTo(96, 68); ctx.lineTo(108, 76);
+  ctx.stroke();
+  ctx.save(); ctx.lineWidth = 10;
+  ctx.beginPath(); ctx.moveTo(18, 52); ctx.lineTo(110, 52); ctx.stroke();
+  ctx.restore();
+}
+function xrIconApply(ctx) {
+  ctx.beginPath(); ctx.moveTo(22, 80); ctx.lineTo(106, 80); ctx.stroke();
+  ctx.save(); ctx.lineWidth = 11;
+  ctx.beginPath(); ctx.moveTo(34, 46); ctx.lineTo(54, 66); ctx.lineTo(98, 16); ctx.stroke();
+  ctx.restore();
+}
+function xrIconPick(ctx) {
+  // an eyedropper: tip, barrel, bulb
+  ctx.save(); ctx.lineWidth = 11;
+  ctx.beginPath(); ctx.moveTo(36, 80); ctx.lineTo(74, 42); ctx.stroke();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(88, 28, 14, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(24, 92); ctx.lineTo(32, 76); ctx.stroke();
+}
+function xrIconCamera(ctx) {
+  ctx.beginPath(); ctx.rect(24, 36, 80, 48); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(46, 36); ctx.lineTo(52, 24); ctx.lineTo(74, 24); ctx.lineTo(80, 36); ctx.stroke();
+  ctx.beginPath(); ctx.arc(64, 60, 15, 0, Math.PI * 2); ctx.stroke();
+}
+
+// clockwise from the top; Apply sits next to the flatten tool it belongs to
+const XR_PANEL_BUTTONS = [
+  { id: 'add',     label: 'Add',     color: 0x6cbf7a, icon: xrIconAdd },
+  { id: 'remove',  label: 'Erase',   color: 0xd9705f, icon: xrIconRemove },
+  { id: 'flatten', label: 'Flatten', color: 0x4fb8ae, icon: xrIconFlatten },
+  { id: 'apply',   label: 'Apply',   color: 0xe3b341, icon: xrIconApply, kind: 'apply' },
+  { id: 'pick',    label: 'Pick Y',  color: 0x9b86e0, icon: xrIconPick },
+  { id: 'orbit',   label: 'Camera',  color: 0x8296ab, icon: xrIconCamera },
+];
+
+function xrPanelTexture(draw, w, h) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  draw(cv.getContext('2d'));
+  const tex = new THREE.CanvasTexture(cv);
+  tex.anisotropy = 4;
+  return tex;
+}
+function xrPanelMat(map, color) {
+  return new THREE.MeshBasicMaterial({ map, color: color === undefined ? 0xffffff : color,
+    transparent: true, depthTest: false, depthWrite: false });
+}
+function xrPanelDisc(r, color, opacity, order) {
+  const m = new THREE.Mesh(new THREE.CircleGeometry(r, 40),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false }));
+  m.renderOrder = order;
+  return m;
+}
+function xrPanelRing(inner, outer, color, order) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(inner, outer, 48),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false }));
+  m.renderOrder = order;
+  return m;
+}
+function xrPanelPlane(w, h, map, order) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), xrPanelMat(map));
+  m.renderOrder = order;
+  return m;
+}
+// ctx.roundRect is too new to count on in a headset browser
+function xrRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function xrPanelInit() {
+  const g = xrPanel.group = new THREE.Group();
+  // above and a little ahead of the left hand, tipped up and back so it faces you while
+  // that hand is held out in front
+  g.position.set(0, 0.035, -0.05);
+  g.rotation.set(-Math.PI * 0.36, 0, 0);
+  g.visible = false;
+
+  g.add(xrPanelDisc(XR_PANEL.plate, 0x0c1118, 0.82, 1000));
+  const rim = xrPanelRing(XR_PANEL.plate - 0.0022, XR_PANEL.plate, 0x4fb8ae, 1001);
+  rim.material.opacity = 0.55;
+  rim.position.z = 0.0002;
+  g.add(rim);
+
+  XR_PANEL_BUTTONS.forEach((def, k) => {
+    const a = k * (Math.PI * 2 / XR_PANEL_BUTTONS.length);
+    const holder = new THREE.Group();
+    holder.position.set(Math.sin(a) * XR_PANEL.ring, Math.cos(a) * XR_PANEL.ring, 0.001);
+    const disc = xrPanelDisc(XR_PANEL.btn, XR_PANEL_IDLE, 0.95, 1002);
+    const ring = xrPanelRing(XR_PANEL.btn - 0.0018, XR_PANEL.btn, def.color, 1003);
+    ring.position.z = 0.0004;
+    const icon = xrPanelPlane(XR_PANEL.icon, XR_PANEL.icon, xrPanelTexture(ctx => {
+      ctx.strokeStyle = '#fff'; ctx.fillStyle = '#fff';
+      ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      def.icon(ctx);
+      // the label rides inside the disc with the glyph: everything here has to stay
+      // within the canvas's inscribed circle, which is the button itself
+      ctx.font = '600 21px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(def.label, 64, 102, 84);
+    }, 128, 128), 1004);
+    icon.position.z = 0.0006;
+    holder.add(disc, ring, icon);
+    g.add(holder);
+    const btn = { def, kind: def.kind || 'tool', holder, mesh: disc, ring, icon, flashUntil: 0 };
+    disc.userData.ctl = btn;
+    xrPanel.buttons.push(btn);
+  });
+
+  // The hub: what the trigger will do right now, plus whatever Apply had to say — and,
+  // while the flatten tool is up, the box/polygon switch, since the mode belongs to the
+  // word under the tool's name and there is no seventh seat on the ring for it.
+  const hub = xrPanelPlane(0.05, 0.023, xrPanelTexture(() => {}, 256, 118), 1004);
+  hub.position.z = 0.0006;
+  hub.userData.ctl = xrPanel.hub = { kind: 'mode', mesh: hub, live: false };
+  g.add(hub);
+
+  xrPanelInitDrawer();
+  xrPanelInitFlatDrawer();
+  xrPanelInitExit();
+  xrPanelDrawHub();
+}
+
+/* ---- the brush drawer ----
+   Two diameters, two ± pairs, hung under the ring and shown only for the tools that use
+   them. Holding the trigger repeats, and accelerates while it does: 1 to 48 voxels is a
+   long way to go one press at a time. */
+function xrPanelInitDrawer() {
+  const d = xrPanel.drawer = new THREE.Group();
+  d.position.set(0, -(XR_PANEL.plate + 0.03), 0.0005);
+  d.visible = false;
+  xrPanel.group.add(d);
+
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(0.152, 0.058),
+    new THREE.MeshBasicMaterial({ color: 0x0c1118, transparent: true, opacity: 0.82, depthTest: false, depthWrite: false }));
+  back.renderOrder = 1000;
+  d.add(back);
+
+  [['w', 'W', 0.014], ['h', 'H', -0.014]].forEach(([dim, tag, y]) => {
+    const read = xrPanelPlane(0.072, 0.024, xrPanelTexture(() => {}, 192, 64), 1004);
+    read.position.set(0, y, 0.001);
+    d.add(read);
+    for (const delta of [-1, 1]) {
+      const holder = new THREE.Group();
+      holder.position.set(delta * 0.057, y, 0.001);
+      const disc = xrPanelDisc(XR_PANEL.step, XR_PANEL_IDLE, 0.95, 1002);
+      const ring = xrPanelRing(XR_PANEL.step - 0.0015, XR_PANEL.step, 0x6f8598, 1003);
+      ring.position.z = 0.0004;
+      const icon = xrPanelPlane(XR_PANEL.step * 1.5, XR_PANEL.step * 1.5, xrPanelTexture(ctx => {
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 7; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(14, 32); ctx.lineTo(50, 32);
+        if (delta > 0) { ctx.moveTo(32, 14); ctx.lineTo(32, 50); }
+        ctx.stroke();
+      }, 64, 64), 1004);
+      icon.position.z = 0.0006;
+      holder.add(disc, ring, icon);
+      d.add(holder);
+      const ctl = { kind: 'brush', dim, tag, delta, holder, mesh: disc, ring, icon, read, value: -1, flashUntil: 0 };
+      disc.userData.ctl = ctl;
+      xrPanel.brush.push(ctl);
+    }
+  });
+}
+
+function xrPanelDrawReadout(ctl, v) {
+  if (ctl.value === v) return;
+  ctl.value = v;
+  const tex = ctl.read.material.map, ctx = tex.image.getContext('2d');
+  ctx.clearRect(0, 0, 192, 64);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#8fa3b5';
+  ctx.font = '600 22px system-ui, -apple-system, sans-serif';
+  ctx.fillText(ctl.tag + ' Ø', 44, 44);
+  ctx.fillStyle = '#eef4f8';
+  ctx.font = '600 38px system-ui, -apple-system, sans-serif';
+  ctx.fillText(String(v), 120, 46);
+  tex.needsUpdate = true;
+}
+
+/* ---- the flatten drawer, and the way out ----
+   Two controls that are one press each and have no business on the ring: the gradient
+   toggle, which only means anything while flatten is up, and Exit VR, which has to be
+   reachable from every tool. Both are plain textured planes — the whole row is the
+   target, so neither needs an aim worth calling precise. */
+function xrPanelInitFlatDrawer() {
+  const d = xrPanel.flatDrawer = new THREE.Group();
+  d.position.set(0, -(XR_PANEL.plate + 0.026), 0.0005);
+  d.visible = false;
+  xrPanel.group.add(d);
+
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(0.152, 0.036),
+    new THREE.MeshBasicMaterial({ color: 0x0c1118, transparent: true, opacity: 0.82, depthTest: false, depthWrite: false }));
+  back.renderOrder = 1000;
+  d.add(back);
+
+  const row = xrPanelPlane(0.144, 0.03, xrPanelTexture(() => {}, 384, 80), 1004);
+  row.position.z = 0.001;
+  d.add(row);
+  row.userData.ctl = xrPanel.grad = { kind: 'grad', mesh: row, drawn: null, flashUntil: 0 };
+  xrPanelDrawGrad();
+}
+function xrPanelDrawGrad() {
+  const on = !!state.flattenGradient, hot = xrPanel.hover === xrPanel.grad;
+  const key = (on ? 'on' : 'off') + (hot ? ':hot' : '');
+  if (xrPanel.grad.drawn === key) return;
+  xrPanel.grad.drawn = key;
+  const tex = xrPanel.grad.mesh.material.map, ctx = tex.image.getContext('2d');
+  ctx.clearRect(0, 0, 384, 80);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = hot ? '#eef4f8' : '#c8d4e0';
+  ctx.font = '600 30px system-ui, -apple-system, sans-serif';
+  ctx.fillText('Gradient', 18, 51);
+  // a switch, so on/off reads at a glance from the shape and not only from the word
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = on ? '#4fb8ae' : (hot ? '#9fb3c4' : '#48626f');
+  xrRoundRect(ctx, 232, 16, 134, 48, 24);
+  if (on) { ctx.fillStyle = 'rgba(79,184,174,0.85)'; ctx.fill(); }
+  ctx.stroke();
+  ctx.fillStyle = on ? '#07231f' : (hot ? '#c8d4e0' : '#8fa3b5');
+  ctx.font = '600 24px system-ui, -apple-system, sans-serif';
+  ctx.fillText(on ? 'ON' : 'OFF', on ? 258 : 288, 49);
+  ctx.beginPath();
+  ctx.arc(on ? 342 : 256, 40, 17, 0, Math.PI * 2);
+  ctx.fillStyle = on ? '#07231f' : (hot ? '#c8d4e0' : '#8fa3b5');
+  ctx.fill();
+  tex.needsUpdate = true;
+}
+
+function xrPanelInitExit() {
+  const m = xrPanelPlane(0.066, 0.026, xrPanelTexture(() => {}, 264, 104), 1004);
+  m.position.set(0, XR_PANEL.plate + 0.02, 0.001);
+  xrPanel.group.add(m);
+  m.userData.ctl = xrPanel.exit = { kind: 'exit', mesh: m, drawn: null, flashUntil: 0 };
+  xrPanelDrawExit();
+}
+function xrPanelDrawExit() {
+  const hot = xrPanel.hover === xrPanel.exit;
+  const key = hot ? 'hot' : 'cold';
+  if (xrPanel.exit.drawn === key) return;
+  xrPanel.exit.drawn = key;
+  const tex = xrPanel.exit.mesh.material.map, ctx = tex.image.getContext('2d');
+  ctx.clearRect(0, 0, 264, 104);
+  ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = hot ? '#d9705f' : '#4a5a68';
+  xrRoundRect(ctx, 6, 16, 252, 72, 34);
+  ctx.stroke();
+  // a doorway with an arrow going out of it
+  ctx.strokeStyle = hot ? '#ffd9d2' : '#c8d4e0';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(74, 28); ctx.lineTo(42, 28); ctx.lineTo(42, 78); ctx.lineTo(74, 78);
+  ctx.moveTo(56, 53); ctx.lineTo(88, 53);
+  ctx.moveTo(76, 41); ctx.lineTo(88, 53); ctx.lineTo(76, 65);
+  ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.fillStyle = hot ? '#ffd9d2' : '#c8d4e0';
+  ctx.font = '600 32px system-ui, -apple-system, sans-serif';
+  ctx.fillText('Exit VR', 108, 64);
+  tex.needsUpdate = true;
+}
+
+const XR_TOOL_TITLES = { add: 'Add', remove: 'Erase', flatten: 'Flatten', pick: 'Pick Y', orbit: 'Camera' };
+function xrPanelDrawHub() {
+  const msg = performance.now() < xrPanel.msgUntil ? xrPanel.msg : '';
+  const title = XR_TOOL_TITLES[state.tool] || state.tool;
+  const swap = xrPanel.hub.live && !msg;   // the sub-line is the mode switch, not a note
+  const sub = msg || (state.tool === 'flatten' ? state.flattenMode
+            : state.tool === 'add' || state.tool === 'remove' ? 'Ø ' + state.brushWidth + '×' + state.brushHeight
+            : state.loaded ? '' : 'no file');
+  const hot = xrPanel.hover === xrPanel.hub;
+  const text = title + '\n' + sub + (swap ? (hot ? '↔hot' : '↔') : '');
+  if (text === xrPanel.hubText) return;   // one canvas redraw per change, not per frame
+  xrPanel.hubText = text;
+  const tex = xrPanel.hub.mesh.material.map, ctx = tex.image.getContext('2d');
+  ctx.clearRect(0, 0, 256, 118);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#eef4f8';
+  ctx.font = '600 40px system-ui, -apple-system, sans-serif';
+  ctx.fillText(title, 128, 52);
+  if (swap) {
+    // a pill and a pair of arrows, so the mode reads as something you can press and not
+    // just as a caption
+    ctx.strokeStyle = hot ? '#9fd4cf' : '#48626f';
+    ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    xrRoundRect(ctx, 30, 66, 196, 40, 20);
+    ctx.stroke();
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(48, 80); ctx.lineTo(70, 80); ctx.moveTo(64, 74); ctx.lineTo(70, 80); ctx.lineTo(64, 86);
+    ctx.moveTo(48, 92); ctx.lineTo(70, 92); ctx.moveTo(54, 86); ctx.lineTo(48, 92); ctx.lineTo(54, 98);
+    ctx.stroke();
+  }
+  if (sub) {
+    ctx.fillStyle = msg ? '#e3b341' : (hot ? '#eef4f8' : '#8fa3b5');
+    ctx.font = '500 26px system-ui, -apple-system, sans-serif';
+    ctx.fillText(sub.length > 22 ? sub.slice(0, 21) + '…' : sub, swap ? 148 : 128, 95);
+  }
+  tex.needsUpdate = true;
+}
+function xrPanelSay(msg, ms) {
+  xrPanel.msg = msg;
+  xrPanel.msgUntil = performance.now() + (ms || 2200);
+}
+
+// Follow the left hand. Nothing is added to the scene until a hand to hang it on turns
+// up, so a one-controller session has no dial rather than one adrift at the rig origin.
+function xrPanelAttach(leftIdx, rightIdx) {
+  xrPanel.aimIdx = rightIdx;
+  const g = xrPanel.group;
+  if (!g) return;
+  const host = leftIdx >= 0 ? xr.controllers[leftIdx] : null;
+  if (!host) { if (g.parent) g.parent.remove(g); g.visible = false; return; }
+  if (g.parent !== host) host.add(g);
+  g.visible = true;
+}
+
+// What is on the dial, and therefore what the ray can hit, follows the active tool.
+// Raycasting does not consult `visible`, so the hit list is rebuilt rather than filtered.
+function xrPanelSync() {
+  const brush = state.tool === 'add' || state.tool === 'remove';
+  const flat = state.tool === 'flatten';
+  xrPanel.drawer.visible = brush;
+  xrPanel.flatDrawer.visible = flat;
+  xrPanel.hub.live = flat;
+  const t = xrPanel.targets;
+  t.length = 0;
+  for (const b of xrPanel.buttons) t.push(b.mesh);
+  t.push(xrPanel.exit.mesh);
+  if (flat) { t.push(xrPanel.hub.mesh); t.push(xrPanel.grad.mesh); }
+  if (brush) for (const c of xrPanel.brush) t.push(c.mesh);
+}
+
+const _xrPanelHits = [];
+function xrPanelPick(ctrl) {
+  const g = xrPanel.group;
+  if (!g) return;
+  xrPanelSync();
+  if (!g.visible || !g.parent || !ctrl) { xrPanel.hover = null; return; }
+  // the controller poses arrive before this frame is drawn, so the dial's own world
+  // matrix is still last frame's — refresh it, or the ray tests against where your hand
+  // used to be
+  g.updateWorldMatrix(true, true);
+  setRaycasterFromController(ctrl);
+  _xrPanelHits.length = 0;
+  raycaster.intersectObjects(xrPanel.targets, false, _xrPanelHits);
+  const hit = _xrPanelHits[0];
+  xrPanel.hover = hit ? hit.object.userData.ctl : null;
+  xrPanel.hoverDist = hit ? hit.distance : 0;
+}
+
+function xrPanelRefresh() {
+  const now = performance.now();
+  for (const b of xrPanel.buttons) {
+    // Apply is a verb, not a mode: it lights for a moment when pressed instead of staying on
+    const lit = b.kind === 'apply' ? now < b.flashUntil : state.tool === b.def.id;
+    xrPanelPaint(b, lit, b.def.color, now);
+  }
+  if (xrPanel.drawer.visible) {
+    for (const c of xrPanel.brush) {
+      xrPanelDrawReadout(c, c.dim === 'w' ? state.brushWidth : state.brushHeight);
+      xrPanelPaint(c, now < c.flashUntil, 0x6cbf7a, now);
+    }
+  }
+  const hubHot = xrPanel.hub.live && xrPanel.hover === xrPanel.hub;
+  xrPanel.hub.mesh.scale.setScalar(hubHot ? 1.06 : 1);
+  xrPanelDrawHub();
+  if (xrPanel.flatDrawer.visible) {
+    xrPanelDrawGrad();
+    xrPanel.grad.mesh.scale.setScalar(xrPanel.hover === xrPanel.grad ? 1.05 : 1);
+  }
+  xrPanelDrawExit();
+  xrPanel.exit.mesh.scale.setScalar(xrPanel.hover === xrPanel.exit ? 1.06 : 1);
+}
+function xrPanelPaint(c, lit, color, now) {
+  const hover = xrPanel.hover === c;
+  c.mesh.material.color.setHex(lit ? color : (hover ? XR_PANEL_HOVER : XR_PANEL_IDLE));
+  c.ring.material.opacity = (lit || hover) ? 1 : 0.35;
+  c.icon.material.color.setHex(lit ? 0x0c1118 : (hover ? 0xffffff : 0xc8d4e0));
+  const s = hover ? 1.1 : 1;
+  c.holder.scale.set(s, s, 1);
+}
+
+// The trigger landed on something. Tool buttons are selectTool; Apply runs the flatten
+// after the checks applyFlatten would otherwise answer with an alert(), which inside a
+// headset is a dialog nobody can see; the hub swaps the flatten mode; ± resize the brush.
+function xrPanelPress(ctl, gamepad) {
+  const now = performance.now();
+  ctl.flashUntil = now + 260;
+  if (gamepad && gamepad.hapticActuators && gamepad.hapticActuators[0]) {
+    try { gamepad.hapticActuators[0].pulse(0.35, 30); } catch (e) { /* optional everywhere */ }
+  }
+  if (ctl.kind === 'tool') { selectTool(ctl.def.id); xrPanel.msgUntil = 0; return; }
+  if (ctl.kind === 'apply') { xrPanelApply(); return; }
+  if (ctl.kind === 'mode') { setFlattenMode(state.flattenMode === 'box' ? 'polygon' : 'box'); return; }
+  if (ctl.kind === 'grad') { setFlattenGradient(!state.flattenGradient); return; }
+  if (ctl.kind === 'exit') { const s = renderer.xr.getSession(); if (s) s.end(); return; }
+  if (ctl.kind === 'brush') {
+    xrPanelBrush(ctl, 1);
+    xrPanel.repeat = { ctl, next: now + 420, fires: 0 };   // held: keep going, faster
+  }
+}
+function xrPanelBrush(ctl, step) {
+  const cur = ctl.dim === 'w' ? state.brushWidth : state.brushHeight;
+  setBrushSize(ctl.dim, cur + ctl.delta * step);
+}
+// Called while the trigger stays down on a ± button. Sliding off it stops the repeat,
+// which is how you stop a run without letting go and re-aiming.
+function xrPanelHold() {
+  const r = xrPanel.repeat;
+  if (!r) return;
+  if (xrPanel.hover !== r.ctl) { xrPanel.repeat = null; return; }
+  const now = performance.now();
+  if (now < r.next) return;
+  r.fires++;
+  r.next = now + 110;
+  r.ctl.flashUntil = now + 110;
+  xrPanelBrush(r.ctl, Math.min(6, 1 + (r.fires >> 2)));
+}
+
+function xrPanelApply() {
+  if (xrPanel.applying) return;   // it is already grinding through the columns
+  if (!state.loaded) { xrPanelSay('Load a file first'); return; }
+  // a shape still being traced is what you almost always mean by Apply, so close it first
+  if (state.flattenMode === 'polygon' && !state.polygonFinished && state.polygon.length >= 3) finishPolygon();
+  if (!flattenAreaBounds()) {
+    xrPanelSay(state.flattenMode === 'box' ? 'Draw a box first' : 'Draw a shape first');
+    return;
+  }
+  const { err } = flattenHeightFn();
+  if (err) { xrPanelSay(err); return; }
+  xrPanel.applying = true;
+  xrPanelSay('Flattening…', 120000);
+  applyFlatten().then(() => {
+    xrPanel.applying = false;
+    xrPanelSay('Flattened');
+  }, e => {
+    xrPanel.applying = false;
+    xrPanelSay('Flatten failed');
+    console.error(e);
+  });
 }
 
 /* ---- the trigger as a mouse button ----
@@ -3116,7 +3648,11 @@ function xrPointerUp(ctrl) {
 // park the cursor there. One raycast a frame, and only when a tool could actually use it.
 function xrUpdateAim() {
   const ctrl = xr.controllers[xr.aimHand];
-  const live = !!ctrl && state.loaded && state.tool !== 'orbit';
+  // a ray resting on the dial is choosing a tool, not pointing at terrain: no cursor, and
+  // the ray stops at the button
+  const onPanel = !!xrPanel.hover;
+  const live = !!ctrl && state.loaded && state.tool !== 'orbit' &&
+               !(onPanel && xr.aimHand === xrPanel.aimIdx);
   let localLen = XR_RAY_LEN;
   if (live) {
     setRaycasterFromController(ctrl);
@@ -3140,9 +3676,12 @@ function xrUpdateAim() {
       }
     }
   } else if (xr.cursor) xr.cursor.visible = false;
+  const panelLen = onPanel ? xrPanel.hoverDist / xrRig.scale.x : XR_RAY_LEN;
   for (let i = 0; i < xr.controllers.length; i++) {
     const ray = xr.controllers[i].userData.ray;
-    if (ray) ray.scale.z = (i === xr.aimHand && live) ? localLen : XR_RAY_LEN;
+    if (!ray) continue;
+    ray.scale.z = (onPanel && i === xrPanel.aimIdx) ? panelLen
+                : (i === xr.aimHand && live) ? localLen : XR_RAY_LEN;
   }
 }
 
@@ -3178,7 +3717,9 @@ function endXRSession() {
   if (xrPtr.stroke && state.loaded) strokeEnd();
   if (xrPtr.box) { xrPtr.box = null; seedFlattenHeightsFromBox(); }
   if (polygonDrag && polygonDrag.source === 'xr') polygonDrag = null;
-  xrPtr.hand = -1; xrPtr.stroke = false; xrPtr.polyPending = false;
+  xrPtr.hand = -1; xrPtr.stroke = false; xrPtr.polyPending = false; xrPtr.panel = false;
+  xrPanel.hover = null; xrPanel.msgUntil = 0; xrPanel.repeat = null;
+  if (xrPanel.group && xrPanel.group.parent) xrPanel.group.parent.remove(xrPanel.group);
   xr.prevBtn = {}; xr.aimPinned = false;
   suppressPolygonClick = false;  // set by a handle grab in VR; it would eat the next mouse click
   if (xr.cursor) xr.cursor.visible = false;
@@ -3215,6 +3756,20 @@ function updateXR() {
 
   let mx = 0, my = 0, vy = 0, turn = 0, zoom = 0, sprint = false;
   const srcs = session.inputSources;
+  // Which hand is which, before anything reads a trigger: the dial rides the left
+  // controller and the right one points at it, and a press can only be routed to the
+  // dial if we already know whether the ray is on it.
+  let leftIdx = -1, rightIdx = -1;
+  for (let i = 0; i < srcs.length; i++) {
+    const h = srcs[i] && srcs[i].handedness;
+    if (h === 'left') leftIdx = i; else if (h === 'right') rightIdx = i;
+  }
+  xrPanelAttach(leftIdx, rightIdx);
+  // not while that hand is mid-stroke: the dial drifting under a ray that is busy
+  // dragging a box would steal the cursor from it
+  if (xrPtr.hand !== -1 && !xrPtr.panel) xrPanel.hover = null;
+  else xrPanelPick(rightIdx >= 0 ? xr.controllers[rightIdx] : null);
+  xrPanelRefresh();
   for (let i = 0; i < srcs.length; i++) {
     const src = srcs[i], gp = src && src.gamepad;
     if (!gp || !gp.axes) continue;
@@ -3240,9 +3795,17 @@ function updateXR() {
     // hand last pulled one
     if (src.handedness === 'right' && !xr.aimPinned) xr.aimHand = i;
     if (xrPtr.hand === -1) {
-      if (trigger) { xrPtr.hand = i; xr.aimHand = i; xr.aimPinned = true; xrPointerDown(ctrl, grip); }
+      if (trigger) {
+        if (i === rightIdx && xrPanel.hover) {
+          // the dial swallows this press whole — no aim change, and nothing reaches the
+          // terrain behind it
+          xrPtr.hand = i; xrPtr.panel = true;
+          xrPanelPress(xrPanel.hover, gp);
+        } else { xrPtr.hand = i; xr.aimHand = i; xr.aimPinned = true; xrPointerDown(ctrl, grip); }
+      }
     } else if (xrPtr.hand === i) {
-      if (trigger) xrPointerMove(ctrl);
+      if (trigger) { if (xrPtr.panel) xrPanelHold(); else xrPointerMove(ctrl); }
+      else if (xrPtr.panel) { xrPtr.panel = false; xrPtr.hand = -1; xrPanel.repeat = null; }
       else { xrPointerUp(ctrl); xrPtr.hand = -1; }
     }
   }
