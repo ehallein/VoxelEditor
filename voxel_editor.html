@@ -58,6 +58,9 @@
   #minimapFullscreenBtn{position:absolute;bottom:100%;right:0;margin-bottom:4px;width:26px;height:22px;padding:0;line-height:20px;text-align:center;border-radius:6px;}
   #overlay{position:absolute;top:12px;left:12px;font-family:var(--mono);font-size:11.5px;color:var(--dim);background:rgba(20,24,29,.55);padding:8px 10px;border-radius:6px;pointer-events:none;line-height:1.6;}
   #overlay b{color:var(--ink);}
+  #vrBtn{position:absolute;top:12px;right:12px;z-index:30;padding:7px 13px;font-size:12px;border-radius:6px;background:var(--panel);border:1px solid var(--line);color:var(--ink);cursor:pointer;}
+  #vrBtn:hover:not(:disabled){border-color:var(--accent);color:var(--accent);}
+  #vrBtn:disabled{opacity:.55;cursor:default;}
   #dropHint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--dim);font-size:13px;text-align:center;}
   #dropHint b{color:var(--ink);font-size:16px;}
   #progress{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--panel);border:1px solid var(--line);padding:16px 22px;border-radius:8px;font-size:12.5px;display:none;text-align:center;gap:8px;flex-direction:column;min-width:220px;z-index:50;}
@@ -212,6 +215,7 @@
       <canvas id="minimap" width="260" height="260"></canvas>
     </div>
     <div id="overlay"></div>
+    <button id="vrBtn" style="display:none">Enter VR</button>
     <div id="dropHint"><b>No terrain loaded</b><span>Use "Load .voxel.json + .voxel.bin" above — select both files at once.<br>"Load splats (.ply)" overlays the Gaussian-splat scene the voxels came from.</span></div>
     <div id="progress"><div id="progressLabel">Working…</div><div class="bar"><div id="progressBar"></div></div></div>
   </div>
@@ -609,7 +613,7 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
    PART 4 — three.js scene, chunked mesher, camera
    ====================================================================== */
 const CHUNK = 16; // voxels per chunk edge
-let scene, camera, renderer, chunkGroup;
+let scene, camera, renderer, chunkGroup, xrRig;
 // One material shared by every chunk (and one for the overview mesh) so the splat
 // panel's "Voxel α" slider can fade the whole voxel surface in one assignment.
 //
@@ -656,9 +660,16 @@ function initScene() {
   camera = new THREE.PerspectiveCamera(60, 1, 0.05, 2000);
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.xr.enabled = true;
   document.getElementById('view3d').appendChild(renderer.domElement);
   chunkGroup = new THREE.Group();
   scene.add(chunkGroup);
+  // In a WebXR session three writes the headset pose straight into `camera`, so the
+  // only way to place yourself in the world is to move the thing above it. Outside a
+  // session the rig is identity and the orbit camera behaves exactly as before.
+  xrRig = new THREE.Group();
+  xrRig.add(camera);
+  scene.add(xrRig);
 
   const amb = new THREE.AmbientLight(0x8090a0, 0.55);
   scene.add(amb);
@@ -671,9 +682,13 @@ function initScene() {
 
   resize();
   window.addEventListener('resize', resize);
-  requestAnimationFrame(loop);
+  // setAnimationLoop, not requestAnimationFrame: inside a session the frames have to
+  // come from the headset's own clock (and its XRFrame), and outside one three falls
+  // back to rAF itself, so this one loop serves both.
+  renderer.setAnimationLoop(loop);
 }
 function resize() {
+  if (renderer.xr.isPresenting) return; // the session owns the drawing buffer and the projection
   const el = document.getElementById('main');
   const w = el.clientWidth, h = el.clientHeight;
   camera.aspect = w / h; camera.updateProjectionMatrix();
@@ -2089,7 +2104,7 @@ document.getElementById('resetClip').addEventListener('click', () => {
 
 /* ---- main loop ---- */
 function loop() {
-  requestAnimationFrame(loop);
+  if (renderer.xr.isPresenting) updateXR();
   if (state.loaded || splat.count > 0) {
     const res = state.loaded ? state.meta.voxelResolution : 0.1;
     const speed = res * 40 * (1/60) * 6;
@@ -2101,7 +2116,7 @@ function loop() {
     if (keys['KeyD']) state.focus.addScaledVector(right, speed);
     if (keys['KeyQ']) state.focus.y -= speed;
     if (keys['KeyE']) state.focus.y += speed;
-    updateCameraFromState();
+    if (!renderer.xr.isPresenting) updateCameraFromState(); // in VR the headset places the camera
     streamTimer++;
     if (streamTimer % 12 === 0 && !state.overviewMode) streamChunks();
     if (pendingFlush) { flushDirty(); pendingFlush = false; }
@@ -2708,6 +2723,7 @@ function updateSplats() {
 }
 function updateSplatViewportUniforms() {
   if (!splat.mat) return;
+  if (renderer.xr.isPresenting) { updateSplatXRUniforms(); return; }
   const el = document.getElementById('main');
   const f = 0.5 * el.clientHeight / Math.tan(camera.fov * Math.PI / 360);
   splat.mat.uniforms.viewport.value.set(el.clientWidth, el.clientHeight);
@@ -2856,11 +2872,220 @@ function initSplats() {
   });
 }
 
+
+/* ======================================================================
+   PART 7 — WebXR preview
+
+   Preview only: the headset shows the same scene the desktop view draws,
+   with no editing in it. Everything that moves the viewpoint moves
+   `xrRig` (see PART 4) — the camera itself belongs to the headset.
+
+   The rig also carries the world scale, which defaults to 1: the source
+   .ply is metric, so a world unit already is a metre and VR is 1:1. At
+   rig scale s, one real metre of walking is s world units and the
+   interpupillary distance scales with it — which is what makes you feel
+   small or huge in the scene rather than merely zoomed, and is why the
+   A/B rescale (below) is a real change of viewpoint and not a zoom.
+   Frames come from renderer.setAnimationLoop, and the splat shader's
+   focal/viewport uniforms are refilled per frame from the XR camera's own
+   projection and eye viewport — the window's size means nothing in here.
+   ====================================================================== */
+const xr = {
+  scale: 1, lastTime: 0,
+  headPos: null, headQuat: null, controllers: [],
+};
+const _XR_UP = new THREE.Vector3(0, 1, 0);
+const _xrFwd = new THREE.Vector3(), _xrRight = new THREE.Vector3(), _xrHead = new THREE.Vector3();
+
+function xrDead(v) { return Math.abs(v) < 0.18 ? 0 : v; }   // thumbsticks rest off-centre
+const XR_TURN_RATE = Math.PI * 0.6;   // radians/s at full stick (~108°/s)
+
+async function initXR() {
+  const btn = document.getElementById('vrBtn');
+  if (!navigator.xr || !navigator.xr.isSessionSupported) {
+    // WebXR is https-only, and this file is usually opened straight off disk — say so
+    // rather than silently offering nothing.
+    if (!window.isSecureContext) {
+      btn.style.display = ''; btn.disabled = true; btn.textContent = 'VR needs https';
+      btn.title = 'WebXR only works on https:// or localhost — serve this file instead of opening it as file://.';
+    }
+    return;
+  }
+  let ok = false;
+  try { ok = await navigator.xr.isSessionSupported('immersive-vr'); } catch (e) { ok = false; }
+  if (!ok) return;
+  btn.style.display = '';
+  btn.addEventListener('click', () => {
+    if (renderer.xr.isPresenting) { const s = renderer.xr.getSession(); if (s) s.end(); return; }
+    navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] })
+      .then(startXRSession, err => { btn.textContent = 'VR unavailable'; console.error(err); });
+  });
+
+  // a short ray out of each hand, so you can see where the controllers are
+  const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+  const rayMat = new THREE.LineBasicMaterial({ color: 0x4fb8ae, transparent: true, opacity: 0.6 });
+  for (let i = 0; i < 2; i++) {
+    const c = renderer.xr.getController(i);
+    const line = new THREE.Line(rayGeo, rayMat);
+    line.scale.z = 0.4;   // metres — the rig's scale sizes it against whatever the world is
+    c.add(line);
+    xrRig.add(c);
+    xr.controllers.push(c);
+  }
+}
+
+async function startXRSession(session) {
+  session.addEventListener('end', endXRSession);
+  // 1:1. The source .ply is metric, and the voxel grid is built in the same space, so a
+  // world unit already is a metre — anything fitted to the model's extent here would
+  // just be a wrong guess at a scale the file already knows. A/B on the right controller
+  // rescale from there if you want to look at the scene as a tabletop model instead.
+  xr.scale = 1;
+  xr.lastTime = 0;
+  await renderer.xr.setSession(session);
+  // stand where the desktop camera was, facing the same way; local-floor puts the head
+  // about 1.6 m above the rig origin, so the rig itself goes that far down
+  const p = camState;
+  // the camera still holds its desktop world position; it is rig-local now, and stays
+  // wrong until the first pose arrives, so clear it rather than start one frame adrift
+  camera.position.set(0, 0, 0);
+  camera.quaternion.identity();
+  camera.updateMatrixWorld(true);
+  xrRig.scale.setScalar(xr.scale);
+  xrRig.rotation.set(0, p.azimuth, 0);
+  xrRig.position.set(
+    state.focus.x + p.distance * Math.sin(p.polar) * Math.sin(p.azimuth),
+    state.focus.y + p.distance * Math.cos(p.polar) - 1.6 * xr.scale,
+    state.focus.z + p.distance * Math.sin(p.polar) * Math.cos(p.azimuth));
+  document.getElementById('vrBtn').textContent = 'Exit VR';
+}
+
+function endXRSession() {
+  document.getElementById('vrBtn').textContent = 'Enter VR';
+  // hand the VR viewpoint back to the orbit camera, so taking the headset off doesn't
+  // teleport the desktop view back to wherever it was standing minutes ago
+  if (xr.headPos && xr.headQuat) {
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(xr.headQuat);
+    if (dir.lengthSq() > 0) {
+      camState.azimuth = Math.atan2(-dir.x, -dir.z);
+      camState.polar = THREE.MathUtils.clamp(Math.acos(THREE.MathUtils.clamp(-dir.y, -1, 1)), 0.15, Math.PI - 0.15);
+      state.focus.copy(xr.headPos).addScaledVector(dir, camState.distance);
+    }
+  }
+  xrRig.position.set(0, 0, 0);
+  xrRig.rotation.set(0, 0, 0);
+  xrRig.scale.setScalar(1);
+  resize();
+  updateCameraFromState();
+  updateSplatViewportUniforms();
+  if (state.loaded) { streamChunks(true); drawMinimap(); }
+}
+
+/* ---- per XR frame: locomotion from the thumbsticks, then the shader's eye uniforms ---- */
+function updateXR() {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  // three has already read this frame's pose into its own XR camera by the time it calls
+  // us back; getCamera copies it down onto `camera`, so the head position below is this
+  // frame's and not the one we drew last time.
+  renderer.xr.getCamera(camera);
+  const now = performance.now();
+  const dt = Math.min(0.1, xr.lastTime ? (now - xr.lastTime) / 1000 : 1 / 72);
+  xr.lastTime = now;
+
+  let mx = 0, my = 0, vy = 0, turn = 0, zoom = 0, sprint = false;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp || !gp.axes) continue;
+    // axes 2/3 are the thumbstick on every headset controller; 0/1 are the old touchpad
+    const ax = gp.axes.length >= 4 ? xrDead(gp.axes[2]) : xrDead(gp.axes[0] || 0);
+    const ay = gp.axes.length >= 4 ? xrDead(gp.axes[3]) : xrDead(gp.axes[1] || 0);
+    const pressed = i => !!(gp.buttons && gp.buttons[i] && gp.buttons[i].pressed);
+    if (pressed(0)) sprint = true;                       // either trigger
+    if (src.handedness === 'right') {
+      turn = ax; vy = -ay;
+      if (pressed(4)) zoom += 1;                         // A: grow the world around you
+      if (pressed(5)) zoom -= 1;                         // B: shrink it
+    } else {
+      mx = ax; my = ay;
+    }
+  }
+
+  // move along the head's own heading, at a constant *perceived* speed: the rig's scale
+  // turns metres per second into world units per second
+  const speed = 3 * (sprint ? 4 : 1) * xrRig.scale.x * dt;
+  if (mx || my || vy) {
+    camera.getWorldDirection(_xrFwd);
+    _xrFwd.y = 0;
+    if (_xrFwd.lengthSq() < 1e-8) _xrFwd.set(0, 0, -1).applyQuaternion(xrRig.quaternion);
+    _xrFwd.normalize();
+    _xrRight.set(-_xrFwd.z, 0, _xrFwd.x);
+    xrRig.position.addScaledVector(_xrFwd, -my * speed);
+    xrRig.position.addScaledVector(_xrRight, mx * speed);
+    xrRig.position.y += vy * speed;
+  }
+
+  _xrHead.setFromMatrixPosition(camera.matrixWorld);
+  // Smooth yaw, eased so small stick deflections turn slowly and the stop is gentle.
+  // Negated: a +Y rotation of the rig swings your facing counter-clockwise, i.e. to the
+  // left, and the stick pushed right has to turn you right.
+  if (turn) xrTransformAroundHead(_xrHead, -turn * Math.abs(turn) * XR_TURN_RATE * dt, 1);
+  if (zoom) xrTransformAroundHead(_xrHead, 0, Math.pow(2, zoom * dt));
+
+  // remember the pose for the hand-back on exit, and keep chunk streaming (which follows
+  // state.focus) centred on wherever you have walked to
+  xr.headPos = (xr.headPos || new THREE.Vector3()).copy(_xrHead);
+  // getWorldQuaternion, not setFromRotationMatrix: the rig's world scale is baked into
+  // camera.matrixWorld and reading a rotation straight off it comes out skewed
+  xr.headQuat = camera.getWorldQuaternion(xr.headQuat || new THREE.Quaternion());
+  if (state.loaded || splat.count > 0) state.focus.copy(_xrHead);
+
+  updateSplatXRUniforms();
+}
+
+// Yaw and scale the rig about the head, not about the rig's origin — anything else
+// swings the world out from under you.
+function xrTransformAroundHead(head, angle, factor) {
+  if (angle) {
+    xrRig.position.sub(head).applyAxisAngle(_XR_UP, angle).add(head);
+    xrRig.rotation.y += angle;
+  }
+  if (factor !== 1) {
+    const s = THREE.MathUtils.clamp(xrRig.scale.x * factor, 0.001, 10000);
+    const f = s / xrRig.scale.x;
+    xrRig.position.sub(head).multiplyScalar(f).add(head);
+    xrRig.scale.setScalar(s);
+    xr.scale = s;
+  }
+}
+
+// The splat quads are sized in pixels, so they need the *eye's* focal length and
+// viewport — both come out of the XR camera three built for this frame.
+function updateSplatXRUniforms() {
+  if (!splat.mat) return;
+  const cam = renderer.xr.getCamera(camera);
+  const eye = (cam && cam.cameras && cam.cameras.length) ? cam.cameras[0] : null;
+  if (!eye) return;
+  let w = 0, h = 0;
+  if (eye.viewport) { w = eye.viewport.z; h = eye.viewport.w; }
+  if (!(w > 0 && h > 0)) {
+    // no per-eye viewport to read: split the session's framebuffer down the middle
+    const layer = renderer.xr.getSession().renderState.baseLayer;
+    if (!layer) return;
+    w = layer.framebufferWidth / 2; h = layer.framebufferHeight;
+  }
+  if (!(w > 0 && h > 0)) return;
+  const e = eye.projectionMatrix.elements;
+  splat.mat.uniforms.viewport.value.set(w, h);
+  splat.mat.uniforms.focal.value.set(0.5 * w * e[0], 0.5 * h * e[5]);
+}
+
 /* ---- boot ---- */
 initScene();
 initSplats();
 setupPointerHandlers();
 updateCameraFromState();
+initXR();
 </script>
 </body>
 </html>

@@ -285,6 +285,46 @@ the source `.ply` puts both in the same world space at once.
     also why loading a `.ply` re-applies the current slider value — a
     material created later would otherwise keep the default.
 
+### WebXR preview (`PART 7`)
+
+"Enter VR" (top-right of the 3D view) shows the *same* scene — voxels,
+splats, flatten overlay — on a headset. Preview only: no editing in VR,
+and the desktop view keeps running on the mirrored canvas.
+
+- **The camera belongs to the headset in a session**, so the viewpoint is
+  placed by a rig (`xrRig`) that `camera` is parented to. Outside a
+  session the rig is identity and orbit/WASD behave exactly as before; on
+  exit the last head pose is handed back to `camState`/`state.focus`, so
+  taking the headset off doesn't teleport the desktop view.
+- **The rig also carries the world scale**, `xrRig.scale` being "world
+  units per real metre". **It defaults to 1**: the source `.ply` is metric
+  and the grid is built in the same space, so VR is 1:1 and anything
+  fitted to the model's extent is just a worse guess at a scale the file
+  already knows. (A fitted default was tried first and reads as the world
+  being about half the size it should be.) The right controller's A/B
+  rescale from there for a tabletop view — the scale moves head
+  translation *and* the IPD together, so it is a real change of viewpoint,
+  not a zoom. Rescaling and turning happen about the head; about the rig
+  origin they swing the world out from under you.
+- **Locomotion**: left stick moves along the head's heading, right stick
+  is up/down plus smooth yaw (≈108°/s at full stick, eased quadratically
+  so small deflections turn slowly), either trigger sprints ×4. Note the
+  sign: a +Y rotation of the rig swings your facing *left*, so the stick's
+  X is negated. `state.focus` follows the head each frame so chunk
+  streaming keeps up with where you fly.
+- **Frames come from `renderer.setAnimationLoop`**, not `requestAnimation-
+  Frame`: in a session they have to come from the headset's clock. Outside
+  one three falls back to rAF itself, so the single `loop()` serves both.
+- **The splat shader needs per-eye `focal`/`viewport`** (its quads are
+  sized in pixels) — they're refilled each frame from the XR camera's own
+  projection matrix and eye viewport, since the window's size means
+  nothing in a session. `resize()` bails out entirely while presenting.
+- Needs https (or localhost): opened as `file://` the button says so
+  instead of silently doing nothing. Frame budget is the real limit — a
+  multi-million-splat `.ply` that is comfortable on a desktop GPU will not
+  hold 72 Hz on a standalone headset; drop the render radius and the splat
+  budget before blaming the code.
+
 ## Known limitations / good next things to check
 
 - **Overview mode has no inter-node face culling.** Every leaf/solid node
