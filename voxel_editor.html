@@ -598,8 +598,22 @@ const CHUNK = 16; // voxels per chunk edge
 let scene, camera, renderer, chunkGroup;
 // One material shared by every chunk (and one for the overview mesh) so the splat
 // panel's "Voxel α" slider can fade the whole voxel surface in one assignment.
-const chunkMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-const overviewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+//
+// The voxel surface is a *solid* with interior and far-side faces behind whatever
+// you are looking at, so blending it naively turns it into a see-through scribble:
+// every depth layer along the ray blends, not just the surface you meant. So each
+// mesh draws its geometry twice, as two groups over the same vertices: first a
+// depth-only prepass, then the shaded pass with depth writes off, which only
+// survives where it equals the frontmost depth. That leaves exactly one translucent
+// skin per pixel, at any alpha, in any view direction.
+const chunkMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, depthWrite: false });
+const overviewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, depthWrite: false });
+const voxelDepthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false });
+// both groups cover the whole (non-indexed) geometry; three draws them in order
+function addVoxelDepthPrepass(geo, vertexCount) {
+  geo.addGroup(0, vertexCount, 0); // voxelDepthMaterial
+  geo.addGroup(0, vertexCount, 1); // the shaded material
+}
 const chunkMeshes = new Map(); // key "cx,cy,cz" -> THREE.Mesh
 let streamTimer = 0;
 
@@ -715,7 +729,8 @@ function buildChunk(cx, cy, cz) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const mesh = new THREE.Mesh(geo, chunkMaterial);
+  addVoxelDepthPrepass(geo, pos.length / 3);
+  const mesh = new THREE.Mesh(geo, [voxelDepthMaterial, chunkMaterial]);
   mesh.userData.chunk = [cx, cy, cz];
   chunkGroup.add(mesh);
   chunkMeshes.set(key, mesh);
@@ -773,7 +788,8 @@ function buildOverviewMesh() {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  overviewMesh = new THREE.Mesh(geo, overviewMaterial);
+  addVoxelDepthPrepass(geo, pos.length / 3);
+  overviewMesh = new THREE.Mesh(geo, [voxelDepthMaterial, overviewMaterial]);
   scene.add(overviewMesh);
 }
 function frameWholeModel() {
@@ -2076,10 +2092,13 @@ function setVoxelOpacity(o) {
   const opaque = o >= 0.999;
   for (const m of [chunkMaterial, overviewMaterial]) {
     m.opacity = o;
-    m.transparent = !opaque;
-    m.depthWrite = opaque;   // see-through voxels must not hide the splats behind them
+    m.transparent = !opaque;   // depth always comes from the prepass, never from here
     m.needsUpdate = true;
   }
+  // A see-through voxel surface still writes depth (that is what keeps it a single
+  // skin), so the splats have to ignore that depth or they'd vanish behind a surface
+  // you are looking through. At full alpha the voxels occlude them again, as normal.
+  if (splat.mat) splat.mat.depthTest = opaque;
 }
 
 function initSplats() {

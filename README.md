@@ -183,6 +183,20 @@ the source `.ply` puts both in the same world space at once.
   "Splat α" does the same the other way; the height-clip slider can cut
   both at the same plane; `V` toggles the splats; "Budget" draws 1-in-N
   splats if a huge file needs it.
+- **The voxel surface is a solid, so fading it needs a depth prepass.** Its
+  interior and far-side faces sit behind whatever you are looking at, and
+  blending them all turns the terrain into a see-through scribble — the
+  silhouette survives but you read ridges from the far side through the
+  near surface. Turning depth writes back on does not fix it: triangles
+  inside one chunk are in scan order, not depth order, so a back-to-front
+  run still blends every layer. Each voxel mesh therefore draws its
+  geometry twice, as two groups over the same vertices — a depth-only
+  prepass (`voxelDepthMaterial`, `colorWrite: false`), then the shaded
+  pass with `depthWrite: false`, which only survives where it equals the
+  frontmost depth. One translucent skin per pixel, any alpha, any view
+  direction. Consequence to keep in mind: the see-through surface still
+  writes depth, so the splats switch to `depthTest: false` whenever voxel
+  α < 1, or they would be culled by a surface you are looking through.
 
 ## Known limitations / good next things to check
 
