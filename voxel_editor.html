@@ -94,10 +94,10 @@
     <section id="toolsSection" style="display:none">
       <h2>Tool</h2>
       <div class="toolgrid">
-        <button id="toolAdd" class="active">Add / fill (1)</button>
+        <button id="toolAdd">Add / fill (1)</button>
         <button id="toolRemove">Remove (2)</button>
         <button id="toolFlatten">Flatten area (3)</button>
-        <button id="toolOrbit">Camera only (4)</button>
+        <button id="toolOrbit" class="active">Camera only (4)</button>
         <button id="toolPick">Pick height (5)</button>
       </div>
       <div class="row"><label>Width Ø</label><input id="brushWidth" type="range" min="1" max="48" value="8"><span id="brushWidthVal" style="font-family:var(--mono);font-size:11px;width:26px;text-align:right">8</span></div>
@@ -147,6 +147,8 @@
       <button id="toggleOverview" class="btn">Show entire model</button>
       <div class="hint" id="overviewHint" style="display:none">Low-detail whole-scene view (each leaf block is one box — no per-voxel surface, no editing here). Click anywhere to jump there and switch back to the detailed, editable view — except with a flatten tool active, where the click draws the selection instead, which is the easy way to pick out a large area.</div>
       <div class="row"><label>Render r</label><input id="renderRadius" type="range" min="1" max="6" value="3"><span id="renderRadiusVal" style="font-family:var(--mono);font-size:11px;width:16px">3</span></div>
+      <div class="row"><label>Cube edges (G)</label><input id="voxelEdges" type="checkbox"></div>
+      <div class="hint">Outline every visible cube face so you can tell the individual voxels apart. The outlines fade out once the cubes get smaller than the line, so distant terrain stays readable.</div>
     </section>
     <section id="clipSection" style="display:none">
       <h2>Height clip</h2>
@@ -421,7 +423,7 @@ const state = {
   nbx: 0, nbz: 0,
   focus: new THREE.Vector3(),
   loaded: false,
-  tool: 'add', brushWidth: 8, brushHeight: 8, brushShape: 'sphere',
+  tool: 'orbit', brushWidth: 8, brushHeight: 8, brushShape: 'sphere',
   lastMinimapClick: null, // {vx,vz} in voxel coords
   flattenMode: 'box', // 'box' | 'polygon'
   flattenBox: null, // {x0,z0,x1,z1} in voxel coords
@@ -596,6 +598,10 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
 
   selfCheck(nodesU32, leafDataU32);
   computeHeightMap();
+  // Start on the camera, not on a brush: the first thing you do with a scene you just
+  // opened is look around it, and an editing tool armed on arrival means the first
+  // click that was meant to orbit paints instead. Loading a second file re-arms it.
+  selectTool('orbit');
   drawMinimap();
 
   // place focus at center of grid, just above terrain there
@@ -635,6 +641,52 @@ let scene, camera, renderer, chunkGroup, xrRig;
 const chunkMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
 const overviewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
 const voxelDepthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, visible: false });
+
+// ---- cube edges -------------------------------------------------------------
+// Drawing the outline of every visible face as real line geometry would roughly
+// double the mesh (four segments per quad, rebuilt on every edit), so instead each
+// quad carries its own 0..1 corner coordinate in `uv` and the fragment shader darkens
+// the band next to the quad's border. fwidth keeps that band a fixed width *in pixels*,
+// so the lines stay crisp close up and fade out on their own once a cube is smaller
+// than the line — no shimmering grid over distant terrain, and no extra draw calls.
+// One uniforms object is shared by both voxel materials, so the toggle is one write.
+const edgeUniforms = {
+  uEdges: { value: 0 },        // 0 = off, 1 = on
+  uEdgeWidth: { value: 1.15 }, // half-width of the darkened band, in pixels
+  uEdgeTint: { value: 0.42 },  // how far the edge darkens toward black
+};
+function withVoxelEdges(mat) {
+  // fwidth needs derivatives, which are core in WebGL2 but an extension in WebGL1;
+  // this makes three emit the #extension line on the contexts that still need it.
+  mat.extensions = Object.assign({}, mat.extensions, { derivatives: true });
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, edgeUniforms);
+    // three declares the `uv` attribute for every non-raw material, map or not, so the
+    // quad coordinate can ride in on it; only the varying that carries it is new here.
+    shader.vertexShader = 'varying vec2 vQuadUv;\n' + shader.vertexShader.replace(
+      '#include <begin_vertex>', '#include <begin_vertex>\n  vQuadUv = uv;');
+    shader.fragmentShader =
+      'uniform float uEdges;\nuniform float uEdgeWidth;\nuniform float uEdgeTint;\nvarying vec2 vQuadUv;\n' +
+      shader.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+  if (uEdges > 0.5) {
+    vec2 band = fwidth(vQuadUv) * uEdgeWidth;           // the border band, in quad units
+    vec2 dist = min(vQuadUv, 1.0 - vQuadUv);            // distance to the nearest border, per axis
+    vec2 soft = smoothstep(vec2(0.0), max(band, vec2(1e-6)), dist);
+    diffuseColor.rgb *= mix(uEdgeTint, 1.0, min(soft.x, soft.y));
+  }`);
+  };
+  mat.customProgramCacheKey = () => 'voxelEdges';
+  return mat;
+}
+withVoxelEdges(chunkMaterial);
+withVoxelEdges(overviewMaterial);
+function setVoxelEdges(on) {
+  edgeUniforms.uEdges.value = on ? 1 : 0;
+}
+
+// uv for the six vertices of a face's two triangles, matching the corner order in
+// CUBE_FACES: the quad's own 0..1 coordinates, which is all the edge shader needs.
+const QUAD_UV = [[0,0],[1,0],[1,1],[0,0],[1,1],[0,1]];
 // both groups cover the whole (non-indexed) geometry; three draws them in order
 function addVoxelDepthPrepass(geo, vertexCount) {
   geo.addGroup(0, vertexCount, 0); // voxelDepthMaterial
@@ -736,7 +788,7 @@ function buildChunk(cx, cy, cz) {
   if (!any) return;
 
   const res = state.meta.voxelResolution;
-  const pos = [], nrm = [], col = [];
+  const pos = [], nrm = [], col = [], uvs = [];
   function idx(lx, ly, lz) { return lx + ly * P + lz * P * P; }
   const faces = CUBE_FACES;
   for (let lx = 1; lx <= CHUNK; lx++) for (let ly = 1; ly <= CHUNK; ly++) for (let lz = 1; lz <= CHUNK; lz++) {
@@ -751,13 +803,15 @@ function buildChunk(cx, cy, cz) {
       const quad = f.corners.map(o => [base[0]+o[0], base[1]+o[1], base[2]+o[2]]);
       // two triangles
       const tri = [quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]];
-      for (const p of tri) {
+      for (let t = 0; t < tri.length; t++) {
+        const p = tri[t];
         const wx = state.meta.gridBounds.min[0] + p[0]*res;
         const wy = state.meta.gridBounds.min[1] + p[1]*res;
         const wz = state.meta.gridBounds.min[2] + p[2]*res;
         pos.push(wx, wy, wz);
         nrm.push(f.n[0], f.n[1], f.n[2]);
         col.push(c.r, c.g, c.b);
+        uvs.push(QUAD_UV[t][0], QUAD_UV[t][1]);
       }
     }
   }
@@ -766,6 +820,7 @@ function buildChunk(cx, cy, cz) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   addVoxelDepthPrepass(geo, pos.length / 3);
   const mesh = new THREE.Mesh(geo, [voxelDepthMaterial, chunkMaterial]);
   mesh.userData.chunk = [cx, cy, cz];
@@ -788,7 +843,7 @@ function buildOverviewMesh() {
   const treeDepth = state.treeDepth, leafSize = state.leafSize;
   const clip = state.heightClip;
   const clipVY = (clip !== null && clip !== undefined) ? Math.floor((clip - gb.min[1]) / res) : Infinity;
-  const pos = [], nrm = [], col = [];
+  const pos = [], nrm = [], col = [], uvs = [];
   function emitBox(bx0, by0, bz0, sizeVoxXZ, hVoxY) {
     const wx = gb.min[0] + bx0 * leafSize * res;
     const wy = gb.min[1] + by0 * leafSize * res;
@@ -798,7 +853,12 @@ function buildOverviewMesh() {
     for (const f of CUBE_FACES) {
       const quad = f.corners.map(o => [wx + o[0]*sx, wy + o[1]*sy, wz + o[2]*sz]);
       const tri = [quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]];
-      for (const p of tri) { pos.push(p[0], p[1], p[2]); nrm.push(f.n[0], f.n[1], f.n[2]); col.push(c.r, c.g, c.b); }
+      // one outline per box, not per voxel — a box here *is* the unit this view draws
+      for (let t = 0; t < tri.length; t++) {
+        const p = tri[t];
+        pos.push(p[0], p[1], p[2]); nrm.push(f.n[0], f.n[1], f.n[2]); col.push(c.r, c.g, c.b);
+        uvs.push(QUAD_UV[t][0], QUAD_UV[t][1]);
+      }
     }
   }
   function walk(node, depth, bx0, by0, bz0) {
@@ -825,6 +885,7 @@ function buildOverviewMesh() {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   addVoxelDepthPrepass(geo, pos.length / 3);
   overviewMesh = new THREE.Mesh(geo, [voxelDepthMaterial, overviewMaterial]);
   scene.add(overviewMesh);
@@ -2145,6 +2206,14 @@ document.getElementById('brushHeight').addEventListener('input', (e) => setBrush
 document.getElementById('brushShape').addEventListener('change', (e) => state.brushShape = e.target.value);
 document.getElementById('renderRadius').addEventListener('input', (e) => { document.getElementById('renderRadiusVal').textContent = e.target.value; markDirtyAll(); });
 document.getElementById('toggleOverview').addEventListener('click', () => setOverviewMode(!state.overviewMode));
+document.getElementById('voxelEdges').addEventListener('change', (e) => setVoxelEdges(e.target.checked));
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyG' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (/INPUT|SELECT|TEXTAREA/.test((e.target && e.target.tagName) || '')) return;
+  const cb = document.getElementById('voxelEdges');
+  cb.checked = !cb.checked;
+  cb.dispatchEvent(new Event('change'));
+});
 document.getElementById('heightClip').addEventListener('input', (e) => {
   state.heightClip = parseFloat(e.target.value);
   const gb = state.meta.gridBounds;

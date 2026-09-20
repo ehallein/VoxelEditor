@@ -95,6 +95,16 @@ Search for these comment headers in the file:
   the chunk mesher, the minimap, and the overview mesh, and is normalized
   to `[gridBounds.min.y, heightClip]` so it renormalizes automatically when
   you clip.
+- **Cube edges ("Cube edges (G)", `withVoxelEdges`)** outlines every visible
+  face so you can tell the individual voxels apart. It is a shader patch on
+  the two voxel materials, not line geometry: each quad carries its own 0..1
+  corner coordinate in `uv` (see `QUAD_UV`, emitted by both meshers) and the
+  fragment shader darkens the band next to the quad's border, with `fwidth`
+  holding that band to a fixed *pixel* width — so nothing is added to the
+  mesh or the draw list, and the outlines fade out by themselves once a cube
+  is smaller than the line instead of turning distant terrain into moire.
+  The toggle is one write to the shared `edgeUniforms`. On the overview mesh
+  the outline is per *box*, which is the unit that view actually draws.
 - **`buildOverviewMesh()`/"Show entire model"** walks the whole tree once
   and draws one *unculled* box per leaf/solid node at its true size
   (reusing whatever compression the octree already has — a big solid
