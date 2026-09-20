@@ -41,6 +41,13 @@
   .row input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:5px 7px;border-radius:5px;font-size:12px;font-family:var(--mono);}
   .row input[type=range]{width:100%;accent-color:var(--accent);}
   .toolgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+  .ptrow{display:flex;align-items:center;gap:6px;padding:2px;border:1px solid transparent;border-radius:5px;}
+  .ptrow.sel{border-color:var(--accent2);}
+  .ptrow input[type=number]{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:5px 7px;border-radius:5px;font-size:12px;font-family:var(--mono);}
+  .ptlabel{padding:4px 7px;font-size:11px;font-family:var(--mono);flex-shrink:0;}
+  .ptcoord{flex:1;font-size:11px;color:var(--dim);font-family:var(--mono);}
+  .ptdel{padding:4px 8px;font-size:11px;line-height:1;flex-shrink:0;}
+  .ptdel:hover{border-color:var(--danger);color:var(--danger);}
   .hint{font-size:11px;color:var(--dim);line-height:1.5;}
   #main{position:relative;overflow:hidden;background:#0c0f12;}
   #view3d{position:absolute;inset:0;}
@@ -107,8 +114,10 @@
       <div class="hint">The selection is drawn into the 3D view as the surface Apply would leave — <b>green</b> where it fills, <b>red</b> where it cuts — and you can draw it there directly instead of on the minimap.</div>
       <div class="toolgrid" id="polygonButtons" style="display:none">
         <button id="finishPolygon" class="btn">Finish shape</button>
-        <button id="clearPolygon" class="btn">Clear points</button>
+        <button id="clearPolygon" class="btn">New shape</button>
       </div>
+      <div class="hint" id="polygonEditHint" style="display:none">Drag a point to move it. Drag the faint handle at an edge's midpoint to add a point there. Alt-click a point, or use ✕, to delete it — Delete/Backspace removes the selected one.</div>
+      <div id="polygonPointList" style="display:none;flex-direction:column;gap:5px"></div>
       <div class="row"><label>Gradient</label><input id="flattenGradient" type="checkbox"></div>
       <div class="hint" id="gradientHint" style="display:none">Samples the current terrain height at each corner/point and interpolates a slope between them, instead of one flat target height. Edit any value to override it, or Resample.</div>
       <div id="flattenFlatControls" style="display:flex;flex-direction:column;gap:8px">
@@ -123,7 +132,6 @@
           <div class="row"><label>−X +Z</label><input id="cornerH01" type="number" step="0.1"></div>
           <div class="row"><label>+X +Z</label><input id="cornerH11" type="number" step="0.1"></div>
         </div>
-        <div id="gradientPolygonControls" style="display:flex;flex-direction:column;gap:8px"></div>
         <button id="resampleGradient" class="btn">Resample from terrain</button>
         <button id="pickHeightBtnGrad" class="btn">Eyedropper: pick height (5)</button>
       </div>
@@ -417,6 +425,7 @@ const state = {
   polygon: [], // [{vx,vz,h}, ...] in voxel coords + world-Y height (gradient mode), box-mode unused
   polygonHover: null, // {vx,vz} live cursor position while drawing
   polygonFinished: false,
+  polygonSelected: null, // index of the point being edited, or null
   heightClip: null, // world Y; null/undefined until loaded = no clip
   mmView: null, // {x0,z0,x1,z1} in voxel coords — current minimap zoom/pan window
   overviewMode: false,
@@ -925,8 +934,14 @@ function setupPointerHandlers() {
       return;
     }
     if (state.tool === 'flatten') {
-      // polygon points are added on 'click' below — it needs e.detail to tell a single click
-      // from the first half of a double-click, exactly as the minimap does
+      if (state.flattenMode === 'polygon') {
+        // an existing point under the cursor is a handle; otherwise fall through to 'click',
+        // which needs e.detail to tell a single click from the first half of a double-click
+        if (beginPolygonHandleDrag(pickPolygonHandle(e.clientX, e.clientY), '3d', e.altKey)) {
+          dragging = true; dragButton = e.button; el.setPointerCapture(e.pointerId);
+        }
+        return;
+      }
       if (state.flattenMode !== 'box') return;
       const hit = surfacePointAt(e.clientX, e.clientY);
       if (!hit) return;
@@ -952,6 +967,11 @@ function setupPointerHandlers() {
       }
       return;
     }
+    if (polygonDrag && polygonDrag.source === '3d') {
+      const hit = surfacePointAt(e.clientX, e.clientY);
+      if (hit) dragPolygonPointTo(hit.vx, hit.vz);
+      return;
+    }
     if (!dragging) return;
     if (view3dBoxDrag) {
       const hit = surfacePointAt(e.clientX, e.clientY);
@@ -975,10 +995,12 @@ function setupPointerHandlers() {
   window.addEventListener('pointerup', (e) => {
     if (dragging && (state.tool === 'add' || state.tool === 'remove')) strokeEnd();
     if (view3dBoxDrag) { view3dBoxDrag = null; seedFlattenHeightsFromBox(); drawMinimap(); }
+    if (polygonDrag) polygonDrag = null;
     dragging = false; dragButton = -1;
   });
   // polygon points in the 3D view, on the same click/dblclick pair the minimap uses
   el.addEventListener('click', (e) => {
+    if (suppressPolygonClick) { suppressPolygonClick = false; return; } // that press grabbed a handle
     if (!state.loaded || state.tool !== 'flatten' || state.flattenMode !== 'polygon') return;
     if (e.detail >= 2) return; // the 'dblclick' handler finishes the shape; don't also add a point
     const hit = surfacePointAt(e.clientX, e.clientY);
@@ -1204,21 +1226,21 @@ document.getElementById('sampleHeight').addEventListener('click', () => {
 });
 function setFlattenMode(mode) {
   state.flattenMode = mode;
-  state.flattenBox = null; state.polygon = []; state.polygonHover = null; state.polygonFinished = false;
+  state.flattenBox = null; state.polygon = []; state.polygonHover = null; state.polygonFinished = false; state.polygonSelected = null;
   document.getElementById('flattenModeBox').classList.toggle('active', mode === 'box');
   document.getElementById('flattenModePolygon').classList.toggle('active', mode === 'polygon');
   document.getElementById('polygonButtons').style.display = mode === 'polygon' ? 'grid' : 'none';
   document.getElementById('flattenHint').textContent = mode === 'box'
     ? 'Drag a rectangle on the minimap or in the 3D view to select an X/Z area, set a target height, then Apply. Everything below the target height becomes solid; everything above becomes empty, within the area.'
-    : 'Click points on the minimap or in the 3D view to trace an outline, then "Finish shape" (or double-click). Set a target height, then Apply.';
+    : 'Click points on the minimap or in the 3D view to trace an outline, then "Finish shape" (or double-click). Afterwards drag the points to adjust it. Set a target height, then Apply.';
   updateGradientControlsVisibility();
-  renderPolygonHeightList();
+  renderPolygonPointList();
   drawMinimap();
 }
 document.getElementById('flattenModeBox').addEventListener('click', () => setFlattenMode('box'));
 document.getElementById('flattenModePolygon').addEventListener('click', () => setFlattenMode('polygon'));
 document.getElementById('finishPolygon').addEventListener('click', () => finishPolygon());
-document.getElementById('clearPolygon').addEventListener('click', () => { state.polygon = []; state.polygonHover = null; state.polygonFinished = false; renderPolygonHeightList(); drawMinimap(); });
+document.getElementById('clearPolygon').addEventListener('click', () => { state.polygon = []; state.polygonHover = null; state.polygonFinished = false; state.polygonSelected = null; renderPolygonPointList(); drawMinimap(); });
 document.getElementById('sampleHeight').addEventListener('click', drawMinimap);
 function finishPolygon() {
   if (state.polygon.length < 3) return;
@@ -1228,26 +1250,187 @@ function finishPolygon() {
   if (h>=0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h+1)*state.meta.voxelResolution).toFixed(2);
   state.polygonHover = null;
   state.polygonFinished = true;
+  renderPolygonPointList();
   drawMinimap();
 }
 /* ---- gradient (per-corner / per-vertex height) controls for the flatten tool ---- */
 function updateGradientControlsVisibility() {
   document.getElementById('gradientBoxControls').style.display = state.flattenMode === 'box' ? 'grid' : 'none';
-  document.getElementById('gradientPolygonControls').style.display = state.flattenMode === 'polygon' ? 'flex' : 'none';
 }
-function renderPolygonHeightList() {
-  const container = document.getElementById('gradientPolygonControls');
+/* ---- editing a finished polygon ----
+   Once a shape exists you mostly want to adjust it, not retrace it, so every point is a
+   handle in both views: drag to move, drag an edge's midpoint handle to insert a point
+   there, alt-click or ✕ to delete. Handles are picked in *screen* space rather than by
+   raycasting the markers — a marker is a fixed size in world units, so at distance it
+   becomes a few pixels and an unhittable target, while a pixel radius is the same
+   forgiving click everywhere.
+
+   Note this is why a click on empty space no longer wipes a finished shape: that used to
+   be how you started over, and it is a trap once the shape is worth editing. "New shape"
+   does it explicitly. */
+const POLY_HANDLE_PX = 13;      // click radius for a vertex handle
+const POLY_EDGE_HANDLE_PX = 10; // slightly tighter, so a vertex always wins where they overlap
+let polygonDrag = null;         // {index, source:'3d'|'mm'} while dragging a point
+let suppressPolygonClick = false; // a handled pointerdown must not also add a point on click
+
+// world Y of the previewed target surface at a point — the height the flatten controls
+// give, falling back to the terrain when they are still incomplete
+function flattenSurfaceY(px, pz, heightFn) {
+  if (heightFn) return columnTopWorldY(heightFn(px, pz));
+  const cur = sampleHeightVY(px, pz);
+  return columnTopWorldY(cur != null ? cur : 0);
+}
+const _projV = new THREE.Vector3();
+// a world point in client (CSS) pixels, or null when it is at or behind the eye
+function worldToScreenPx(x, y, z) {
+  _projV.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+  if (_projV.z > -camera.near) return null;
+  _projV.applyMatrix4(camera.projectionMatrix);
+  const rect = renderer.domElement.getBoundingClientRect();
+  return [rect.left + (_projV.x * 0.5 + 0.5) * rect.width, rect.top + (-_projV.y * 0.5 + 0.5) * rect.height];
+}
+// every draggable handle of the polygon, in client pixels: one per vertex, plus one per edge
+// midpoint once the shape is closed (dragging one of those inserts a point there)
+function polygonHandlesScreen() {
+  const out = [];
+  if (!state.loaded || state.flattenMode !== 'polygon') return out;
+  const poly = state.polygon;
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const heightFn = flattenHeightFn().fn;
+  const at = (px, pz) => worldToScreenPx(gb.min[0] + px * res, flattenSurfaceY(px, pz, heightFn), gb.min[2] + pz * res);
+  poly.forEach((pt, i) => {
+    const sp = at(pt.vx, pt.vz);
+    if (sp) out.push({ kind: 'vertex', index: i, sx: sp[0], sy: sp[1] });
+  });
+  if (state.polygonFinished && poly.length >= 3) {
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const mx = (a.vx + b.vx) / 2, mz = (a.vz + b.vz) / 2;
+      const sp = at(mx, mz);
+      if (sp) out.push({ kind: 'edge', index: i, sx: sp[0], sy: sp[1], vx: Math.round(mx), vz: Math.round(mz) });
+    }
+  }
+  return out;
+}
+// nearest handle to a client point, vertices first so an edge midpoint never shadows one
+function pickPolygonHandle(clientX, clientY, handles) {
+  const hs = handles || polygonHandlesScreen();
+  let best = null, bestD = Infinity;
+  for (const kind of ['vertex', 'edge']) {
+    const limit = (kind === 'vertex' ? POLY_HANDLE_PX : POLY_EDGE_HANDLE_PX) ** 2;
+    for (const h of hs) {
+      if (h.kind !== kind) continue;
+      const d = (h.sx - clientX) ** 2 + (h.sy - clientY) ** 2;
+      if (d <= limit && d < bestD) { bestD = d; best = h; }
+    }
+    if (best) return best;
+    bestD = Infinity;
+  }
+  return null;
+}
+// the same handles, but positioned on the minimap instead of in the 3D view
+function polygonHandlesMinimap() {
+  const out = [];
+  if (!state.loaded || state.flattenMode !== 'polygon' || !state.mmView) return out;
+  const v = state.mmView, r = mmCanvas.getBoundingClientRect();
+  const at = (px, pz) => [r.left + ((px - v.x0) / (v.x1 - v.x0)) * r.width, r.top + ((pz - v.z0) / (v.z1 - v.z0)) * r.height];
+  state.polygon.forEach((pt, i) => {
+    const sp = at(pt.vx, pt.vz);
+    out.push({ kind: 'vertex', index: i, sx: sp[0], sy: sp[1] });
+  });
+  if (state.polygonFinished && state.polygon.length >= 3) {
+    for (let i = 0; i < state.polygon.length; i++) {
+      const a = state.polygon[i], b = state.polygon[(i + 1) % state.polygon.length];
+      const mx = (a.vx + b.vx) / 2, mz = (a.vz + b.vz) / 2;
+      const sp = at(mx, mz);
+      out.push({ kind: 'edge', index: i, sx: sp[0], sy: sp[1], vx: Math.round(mx), vz: Math.round(mz) });
+    }
+  }
+  return out;
+}
+
+function selectPolygonPoint(i) {
+  state.polygonSelected = i;
+  renderPolygonPointList();
+  drawMinimap();
+}
+// insert a point splitting edge `edgeIndex`; its height starts on that edge, so inserting
+// alone never changes the surface — only dragging the new point does
+function insertPolygonPoint(edgeIndex, vx, vz) {
+  const poly = state.polygon;
+  const a = poly[edgeIndex], b = poly[(edgeIndex + 1) % poly.length];
+  const ah = (a && a.h != null && !isNaN(a.h)) ? a.h : 0;
+  const bh = (b && b.h != null && !isNaN(b.h)) ? b.h : ah;
+  poly.splice(edgeIndex + 1, 0, { vx, vz, h: (ah + bh) / 2 });
+  return edgeIndex + 1;
+}
+function deletePolygonPoint(i) {
+  if (i == null || i < 0 || i >= state.polygon.length) return;
+  state.polygon.splice(i, 1);
+  // below three points it is no longer an area — drop back to tracing rather than pretending
+  if (state.polygon.length < 3) state.polygonFinished = false;
+  if (state.polygonSelected != null) {
+    if (state.polygonSelected === i) state.polygonSelected = null;
+    else if (state.polygonSelected > i) state.polygonSelected--;
+  }
+  renderPolygonPointList();
+  drawMinimap();
+}
+// start dragging whatever handle is under the cursor; returns true if one was taken
+function beginPolygonHandleDrag(handle, source, altKey) {
+  if (!handle) return false;
+  suppressPolygonClick = true;
+  if (altKey && handle.kind === 'vertex') { deletePolygonPoint(handle.index); return true; }
+  const idx = handle.kind === 'edge' ? insertPolygonPoint(handle.index, handle.vx, handle.vz) : handle.index;
+  state.polygonSelected = idx;
+  polygonDrag = { index: idx, source };
+  renderPolygonPointList();
+  drawMinimap();
+  return true;
+}
+function dragPolygonPointTo(vx, vz) {
+  if (!polygonDrag) return;
+  const pt = state.polygon[polygonDrag.index];
+  if (!pt || (pt.vx === vx && pt.vz === vz)) return;
+  pt.vx = vx; pt.vz = vz;
+  renderPolygonPointList();
+  drawMinimap();
+}
+function renderPolygonPointList() {
+  const container = document.getElementById('polygonPointList');
+  const show = state.flattenMode === 'polygon' && state.polygon.length > 0;
+  container.style.display = show ? 'flex' : 'none';
+  document.getElementById('polygonEditHint').style.display = show ? 'block' : 'none';
   container.innerHTML = '';
-  state.polygon.forEach((p, i) => {
+  if (!show) return;
+  state.polygon.forEach((pt, i) => {
     const row = document.createElement('div');
-    row.className = 'row';
-    const label = document.createElement('label');
+    row.className = 'ptrow' + (state.polygonSelected === i ? ' sel' : '');
+    const label = document.createElement('button');
+    label.className = 'ptlabel';
     label.textContent = 'P' + (i + 1);
-    const input = document.createElement('input');
-    input.type = 'number'; input.step = '0.1';
-    input.value = p.h != null ? p.h.toFixed(2) : '';
-    input.addEventListener('input', () => { p.h = parseFloat(input.value); drawMinimap(); });
-    row.appendChild(label); row.appendChild(input);
+    label.title = 'Select this point (highlights it in both views)';
+    label.addEventListener('click', () => selectPolygonPoint(state.polygonSelected === i ? null : i));
+    row.appendChild(label);
+    if (state.flattenGradient) {
+      const input = document.createElement('input');
+      input.type = 'number'; input.step = '0.1';
+      input.value = pt.h != null && !isNaN(pt.h) ? pt.h.toFixed(2) : '';
+      input.addEventListener('input', () => { pt.h = parseFloat(input.value); drawMinimap(); });
+      input.addEventListener('focus', () => selectPolygonPoint(i));
+      row.appendChild(input);
+    } else {
+      const coord = document.createElement('span');
+      coord.className = 'ptcoord';
+      coord.textContent = 'x ' + pt.vx + ' · z ' + pt.vz;
+      row.appendChild(coord);
+    }
+    const del = document.createElement('button');
+    del.className = 'ptdel';
+    del.textContent = '✕';
+    del.title = 'Delete this point';
+    del.addEventListener('click', () => deletePolygonPoint(i));
+    row.appendChild(del);
     container.appendChild(row);
   });
 }
@@ -1262,7 +1445,7 @@ function resampleGradientHeights() {
     }
   } else {
     for (const p of state.polygon) { const h = sampleHeightWorldY(p.vx, p.vz); if (h != null) p.h = h; }
-    renderPolygonHeightList();
+    renderPolygonPointList();
   }
 }
 document.getElementById('resampleGradient').addEventListener('click', resampleGradientHeights);
@@ -1273,6 +1456,7 @@ document.getElementById('flattenGradient').addEventListener('change', (e) => {
   document.getElementById('gradientHint').style.display = state.flattenGradient ? 'block' : 'none';
   updateGradientControlsVisibility();
   if (state.flattenGradient) resampleGradientHeights();
+  renderPolygonPointList();
   drawMinimap();
 });
 
@@ -1310,6 +1494,10 @@ const flattenFillGhostMaterial = new THREE.MeshBasicMaterial({ vertexColors: tru
 const flattenLineMaterial = new THREE.LineBasicMaterial({ color: 0x7fe8de, transparent: true, opacity: 0.95, depthTest: false });
 const flattenStemMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.8, depthTest: false });
 const flattenMarkerMaterial = new THREE.MeshBasicMaterial({ color: 0x7fe8de, depthTest: false });
+const flattenMarkerSelMaterial = new THREE.MeshBasicMaterial({ color: 0xe0a458, depthTest: false });
+// the "add a point here" handles: present but quiet, so they read as an offer rather than
+// as part of the shape
+const flattenEdgeHandleMaterial = new THREE.MeshBasicMaterial({ color: 0x7fe8de, depthTest: false, transparent: true, opacity: 0.4 });
 let flattenOverlay = null, flattenOverlaySig = null;
 
 function disposeFlattenOverlay() {
@@ -1332,7 +1520,7 @@ function flattenOverlaySignature() {
   if (!state.loaded || (state.tool !== 'flatten' && state.tool !== 'pick')) return 'off';
   const parts = [state.flattenMode, state.flattenGradient ? 'g' : 'f',
                  state.undoStack.length, state.redoStack.length, String(state.heightClip),
-                 document.getElementById('flattenY').value];
+                 document.getElementById('flattenY').value, String(state.polygonSelected)];
   if (state.flattenMode === 'box') {
     const b = state.flattenBox;
     parts.push(b ? [b.x0, b.z0, b.x1, b.z1].join(',') : '-');
@@ -1384,13 +1572,9 @@ function buildFlattenOverlay() {
   const heightFn = flattenHeightFn().fn; // undefined while the controls are still incomplete
   const wx = (vx) => gb.min[0] + vx * res;
   const wz = (vz) => gb.min[2] + vz * res;
-  // Height of the preview surface at a point, falling back to the terrain itself so an
-  // incomplete gradient still draws its outline somewhere sensible instead of down at y=0.
-  const surfaceY = (px, pz) => {
-    if (heightFn) return columnTopWorldY(heightFn(px, pz));
-    const cur = sampleHeightVY(px, pz);
-    return columnTopWorldY(cur != null ? cur : 0);
-  };
+  // falls back to the terrain itself, so an incomplete gradient still draws its outline
+  // somewhere sensible instead of down at y=0
+  const surfaceY = (px, pz) => flattenSurfaceY(px, pz, heightFn);
   const group = new THREE.Group();
 
   /* ---- the target surface itself, one quad per (possibly coarsened) column ---- */
@@ -1474,6 +1658,7 @@ function buildFlattenOverlay() {
   }
   if (markers.length) {
     const markerGeo = new THREE.OctahedronGeometry(res * 0.9);
+    const markerSelGeo = new THREE.OctahedronGeometry(res * 1.3);
     const stemPos = [], stemCol = [];
     const cornerNames = ['-X-Z', '+X-Z', '-X+Z', '+X+Z'];
     markers.forEach((m, i) => {
@@ -1484,7 +1669,8 @@ function buildFlattenOverlay() {
       const c = cutFillColor(heightFn ? heightFn(px, pz) : (curVY != null ? curVY : 0), curVY);
       stemPos.push(wx(px), ground, wz(pz), wx(px), target, wz(pz));
       stemCol.push(c.r, c.g, c.b, c.r, c.g, c.b);
-      const dot = new THREE.Mesh(markerGeo, flattenMarkerMaterial);
+      const selected = isPoly && state.polygonSelected === i;
+      const dot = new THREE.Mesh(selected ? markerSelGeo : markerGeo, selected ? flattenMarkerSelMaterial : flattenMarkerMaterial);
       dot.position.set(wx(px), target, wz(pz));
       dot.renderOrder = 12;
       group.add(dot);
@@ -1502,6 +1688,18 @@ function buildFlattenOverlay() {
     const stems = new THREE.LineSegments(geo, flattenStemMaterial);
     stems.renderOrder = 11;
     group.add(stems);
+
+    if (isPoly && state.polygonFinished && poly.length >= 3) {
+      const edgeGeo = new THREE.OctahedronGeometry(res * 0.55);
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        const mx = (a.vx + b.vx) / 2, mz = (a.vz + b.vz) / 2;
+        const h = new THREE.Mesh(edgeGeo, flattenEdgeHandleMaterial);
+        h.position.set(wx(mx), surfaceY(mx, mz), wz(mz));
+        h.renderOrder = 12;
+        group.add(h);
+      }
+    }
   }
 
   flattenOverlay = group;
@@ -1572,14 +1770,14 @@ function applyPickedHeight(vx, vz, worldY) {
       if (d < bestD) { bestD = d; bestI = i; }
     });
     state.polygon[bestI].h = worldY;
-    renderPolygonHeightList();
+    renderPolygonPointList();
     setPickHint('Point P' + (bestI + 1) + ' set to ' + val + '. Still picking — press 3 or Esc when done.');
   }
   drawMinimap();
 }
 // add a point to the polygon; worldY = the height picked in 3D, or null to sample the terrain
 function addPolygonPoint(vx, vz, worldY) {
-  if (state.polygonFinished) { state.polygon = []; state.polygonFinished = false; } // a click after finishing starts a fresh shape
+  if (state.polygonFinished) return; // a finished shape is edited by its handles; "New shape" starts over
   let h = worldY;
   if (h == null) {
     const sampled = sampleHeightWorldY(vx, vz);
@@ -1587,7 +1785,7 @@ function addPolygonPoint(vx, vz, worldY) {
   }
   state.polygon.push({ vx, vz, h });
   state.polygonHover = null;
-  if (state.flattenGradient) renderPolygonHeightList();
+  renderPolygonPointList();
   drawMinimap();
 }
 // seed the flat target (and the gradient corners) from the terrain under a freshly dragged box
@@ -1655,9 +1853,18 @@ function drawMinimap() {
     if (state.polygonFinished) mmCtx.closePath();
     if (state.polygonFinished) mmCtx.fill();
     mmCtx.stroke();
+    if (state.polygonFinished && state.polygon.length >= 3) {
+      mmCtx.fillStyle = 'rgba(127,232,222,0.45)';
+      for (let i = 0; i < state.polygon.length; i++) {
+        const a = state.polygon[i], b = state.polygon[(i+1) % state.polygon.length];
+        const [x,y] = toScreen((a.vx+b.vx)/2, (a.vz+b.vz)/2);
+        mmCtx.beginPath(); mmCtx.arc(x,y,2.5,0,Math.PI*2); mmCtx.fill();
+      }
+    }
     state.polygon.forEach((p, i) => {
       const [x,y] = toPx(p);
-      mmCtx.beginPath(); mmCtx.arc(x,y,3,0,Math.PI*2); mmCtx.fillStyle='#4fb8ae'; mmCtx.fill();
+      const sel = state.polygonSelected === i;
+      mmCtx.beginPath(); mmCtx.arc(x,y,sel?5:3,0,Math.PI*2); mmCtx.fillStyle = sel ? '#e0a458' : '#4fb8ae'; mmCtx.fill();
       if (state.flattenGradient) { mmCtx.fillStyle = '#dce8e6'; mmCtx.font = '10px sans-serif'; mmCtx.fillText(String(i+1), x+5, y-5); }
     });
   }
@@ -1701,7 +1908,12 @@ mmCanvas.addEventListener('pointerdown', (e) => {
     applyPickedHeight(vx, vz, h);
     return;
   }
-  if (state.tool === 'flatten' && state.flattenMode === 'polygon') return; // point adding is handled by 'click' below (needs e.detail to tell single vs double clicks apart)
+  if (state.tool === 'flatten' && state.flattenMode === 'polygon') {
+    // handles first; plain clicks still add points via 'click' below (which needs e.detail
+    // to tell a single click from the first half of a double-click)
+    beginPolygonHandleDrag(pickPolygonHandle(e.clientX, e.clientY, polygonHandlesMinimap()), 'mm', e.altKey);
+    return;
+  }
   if (state.tool === 'flatten' && state.flattenMode === 'box') {
     mmDragStart = { vx, vz };
     state.flattenBox = { x0: vx, z0: vz, x1: vx, z1: vz };
@@ -1710,6 +1922,7 @@ mmCanvas.addEventListener('pointerdown', (e) => {
   mmDragStart = { vx, vz };
 });
 mmCanvas.addEventListener('click', (e) => {
+  if (suppressPolygonClick) { suppressPolygonClick = false; return; } // that press grabbed a handle
   if (!state.loaded) return;
   if (!(state.tool === 'flatten' && state.flattenMode === 'polygon')) return;
   const { vx, vz } = mmVoxelFromEvent(e);
@@ -1717,6 +1930,11 @@ mmCanvas.addEventListener('click', (e) => {
   addPolygonPoint(vx, vz, null); // no 3D pick behind this one — sample the terrain for its height
 });
 mmCanvas.addEventListener('pointermove', (e) => {
+  if (polygonDrag && polygonDrag.source === 'mm') {
+    const { vx, vz } = mmVoxelFromEvent(e);
+    dragPolygonPointTo(vx, vz);
+    return;
+  }
   if (state.tool === 'flatten' && state.flattenMode === 'polygon' && state.polygon.length > 0 && !state.polygonFinished) {
     state.polygonHover = mmVoxelFromEvent(e);
     drawMinimap();
@@ -1736,6 +1954,7 @@ mmCanvas.addEventListener('dblclick', (e) => {
   drawMinimap();
 });
 window.addEventListener('pointerup', (e) => {
+  if (polygonDrag) polygonDrag = null;
   if (!mmDragStart) return;
   if (state.tool !== 'flatten') {
     const rect = mmCanvas.getBoundingClientRect();
@@ -1788,10 +2007,18 @@ function setMinimapFullscreen(full) {
 document.getElementById('minimapFullscreenBtn').addEventListener('click', () => setMinimapFullscreen(!mmFullscreen));
 window.addEventListener('resize', () => { if (mmFullscreen) { sizeMinimapCanvas(); drawMinimap(); } });
 window.addEventListener('keydown', (e) => {
+  if ((e.code === 'Delete' || e.code === 'Backspace') && state.tool === 'flatten' && state.flattenMode === 'polygon'
+      && !/INPUT|SELECT|TEXTAREA/.test((e.target && e.target.tagName) || '')) {
+    // the selected point, or — while still tracing — the one you just put down
+    if (state.polygonSelected != null) { e.preventDefault(); deletePolygonPoint(state.polygonSelected); }
+    else if (!state.polygonFinished && state.polygon.length) { e.preventDefault(); deletePolygonPoint(state.polygon.length - 1); }
+    return;
+  }
   if (e.code === 'Escape') {
     if (mmFullscreen) setMinimapFullscreen(false);
     else if (state.tool === 'pick') selectTool('flatten');
-    else if (state.polygon.length > 0) { state.polygon = []; state.polygonHover = null; drawMinimap(); }
+    else if (state.polygonSelected != null) selectPolygonPoint(null);
+    else if (state.polygon.length > 0) { state.polygon = []; state.polygonHover = null; state.polygonFinished = false; renderPolygonPointList(); drawMinimap(); }
   }
 });
 

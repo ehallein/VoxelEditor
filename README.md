@@ -157,6 +157,26 @@ Search for these comment headers in the file:
   empty voxel in front of the face, and clamps into the grid. A polygon
   point clicked in 3D takes the height you actually clicked, not a
   resampled one.
+- **Editing a finished polygon**: every point is a handle in both views — drag
+  to move it, drag the faint handle at an edge's midpoint to insert a point
+  there (`insertPolygonPoint`, which starts the new point's height *on* that
+  edge, so inserting alone never changes the surface), alt-click or the
+  panel's ✕ to delete, Delete/Backspace for the selected point (or, while
+  still tracing, the one you just put down). Dropping below three points
+  reopens the shape for tracing rather than pretending it's still an area.
+  The point list in the panel is no longer gradient-only: it's how you
+  select, inspect and delete points in both modes, and the selected point is
+  highlighted in the panel, on the minimap and in 3D at once.
+  - **Handles are picked in screen space** (`polygonHandlesScreen` /
+    `pickPolygonHandle`), not by raycasting the marker meshes. A marker is a
+    fixed size in *world* units, so at any distance it shrinks to a few
+    pixels and becomes an unhittable target; a pixel radius is the same
+    forgiving click everywhere. Vertices are tested before edge midpoints, so
+    a midpoint can never shadow a vertex sitting under it.
+  - **Behaviour change**: a click on empty space no longer wipes a finished
+    shape. That used to be how you started over, and it's a trap once the
+    shape is worth editing — "New shape" (the old "Clear points") does it
+    explicitly now.
 - **Eyedropper (tool 5, `applyPickedHeight`)**: clicking the terrain — in 3D
   or on the minimap — sets the flatten height from the top of the voxel you
   hit. Which control it feeds depends on the mode: with gradient off it sets
@@ -174,7 +194,9 @@ Search for these comment headers in the file:
   double-click apart (this is what a `pointerdown`-based version got wrong
   — a double-click fires two `pointerdown`s before the browser's
   `dblclick`, so it was adding two extra points every time you tried to
-  close a shape).
+  close a shape). Handle drags are the other way round — they start on
+  `pointerdown`, and set `suppressPolygonClick` so the `click` that follows
+  the drag does not also drop a new point where you let go.
 - **Export**: `compact()` → `encodeTree()` → rebuild the JSON header
   (bounds/resolution/version copied through, counts recomputed) → ZIP both
   files → `downloads.save()`.
