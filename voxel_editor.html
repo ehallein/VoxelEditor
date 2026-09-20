@@ -894,6 +894,9 @@ function streamChunks(force) {
 }
 
 /* ---- camera controls: drag orbit, wheel zoom, WASD move focus ---- */
+// Splats alone are a scene worth flying around, so the camera answers the mouse for them
+// too; only the editing tools need an actual voxel grid behind them.
+function sceneHasContent() { return state.loaded || splat.count > 0; }
 const camState = { azimuth: 0.9, polar: 1.0, distance: 20 };
 const keys = {};
 window.addEventListener('keydown', e => {
@@ -925,8 +928,12 @@ document.addEventListener('DOMContentLoaded', () => {}); // noop, init happens b
 function setupPointerHandlers() {
   const el = renderer.domElement;
   el.addEventListener('pointerdown', (e) => {
-    if (!state.loaded) return;
-    if (e.button === 2 || state.tool === 'orbit') { dragging = true; dragButton = e.button; lastX = e.clientX; lastY = e.clientY; el.setPointerCapture(e.pointerId); return; }
+    if (!sceneHasContent()) return;
+    // With splats but no voxels there is nothing to paint or flatten, so every drag orbits —
+    // otherwise a .ply loaded on its own would sit there and refuse the mouse entirely.
+    if (e.button === 2 || state.tool === 'orbit' || !state.loaded) {
+      dragging = true; dragButton = e.button; lastX = e.clientX; lastY = e.clientY; el.setPointerCapture(e.pointerId); return;
+    }
     if (state.tool === 'pick') {
       const hit = surfacePointAt(e.clientX, e.clientY);
       if (hit) applyPickedHeight(hit.vx, hit.vz, hit.topWorldY);
@@ -983,7 +990,7 @@ function setupPointerHandlers() {
       drawMinimap();
       return;
     }
-    if (dragButton === 2 || state.tool === 'orbit') {
+    if (dragButton === 2 || state.tool === 'orbit' || !state.loaded) {
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       camState.azimuth -= dx * 0.006;
       camState.polar = THREE.MathUtils.clamp(camState.polar - dy * 0.006, 0.15, Math.PI - 0.15);
@@ -993,10 +1000,14 @@ function setupPointerHandlers() {
     }
   });
   window.addEventListener('pointerup', (e) => {
-    if (dragging && (state.tool === 'add' || state.tool === 'remove')) strokeEnd();
+    // Release the drag first. Everything after this is voxel-grid bookkeeping that throws
+    // without one (strokeEnd -> computeHeightMap reads state.meta), and a throw here used to
+    // leave `dragging` latched — the camera then orbited with no button held.
+    const wasDragging = dragging;
+    dragging = false; dragButton = -1;
+    if (wasDragging && state.loaded && (state.tool === 'add' || state.tool === 'remove')) strokeEnd();
     if (view3dBoxDrag) { view3dBoxDrag = null; seedFlattenHeightsFromBox(); drawMinimap(); }
     if (polygonDrag) polygonDrag = null;
-    dragging = false; dragButton = -1;
   });
   // polygon points in the 3D view, on the same click/dblclick pair the minimap uses
   el.addEventListener('click', (e) => {
@@ -1014,6 +1025,7 @@ function setupPointerHandlers() {
   });
   el.addEventListener('contextmenu', e => e.preventDefault());
   el.addEventListener('wheel', (e) => {
+    if (!sceneHasContent()) return;
     e.preventDefault();
     camState.distance = THREE.MathUtils.clamp(camState.distance * (1 + Math.sign(e.deltaY) * 0.12), 1, 800);
   }, { passive: false });
@@ -2256,23 +2268,29 @@ const SPLAT_VS = [
   'attribute float splatIndex;',
   'uniform sampler2D splatTex;',
   'uniform vec2 texSize;',
+  'uniform float blocksPerRow;',
   'uniform vec2 viewport;',
   'uniform vec2 focal;',
   'uniform float opacityScale;',
   'uniform float clipY;',
   'varying vec4 vColor;',
   'varying vec2 vQuad;',
-  'vec4 fetchTexel(float t) {',
-  '  float x = mod(t, texSize.x);',
-  '  float y = floor(t / texSize.x);',
-  '  return texture2D(splatTex, (vec2(x, y) + 0.5) / texSize);',
+  // A splat's 4 texels are addressed as (block row, column within it), never as one
+  // linear texel index. A linear index is splatIndex * 4, which passes 2^24 — the largest
+  // integer a float32 holds exactly — at 4.2M splats; past that the odd indices round to
+  // even and every splat reads its neighbour's covariance and colour, which is what the
+  // giant smeared blobs on a 5M-splat file were. Row and column both stay small, and
+  // texSize.x is a power of two, so blocksPerRow divides exactly.
+  'vec4 fetchTexel(vec2 blk, float k) {',
+  '  return texture2D(splatTex, (blk + vec2(k + 0.5, 0.5)) / texSize);',
   '}',
   'void main() {',
-  '  float t0 = splatIndex * 4.0;',
-  '  vec4 a   = fetchTexel(t0);',
-  '  vec4 c1  = fetchTexel(t0 + 1.0);',
-  '  vec4 c2  = fetchTexel(t0 + 2.0);',
-  '  vec4 rgb = fetchTexel(t0 + 3.0);',
+  '  float by = floor(splatIndex / blocksPerRow);',
+  '  vec2 blk = vec2((splatIndex - by * blocksPerRow) * 4.0, by);',
+  '  vec4 a   = fetchTexel(blk, 0.0);',
+  '  vec4 c1  = fetchTexel(blk, 1.0);',
+  '  vec4 c2  = fetchTexel(blk, 2.0);',
+  '  vec4 rgb = fetchTexel(blk, 3.0);',
   '  vColor = vec4(rgb.rgb, a.w * opacityScale);',
   '  vQuad = position.xy;',
   '  vec4 centre = vec4(a.xyz, 1.0);',
@@ -2392,7 +2410,11 @@ async function loadSplatPly(arrayBuffer, name) {
     if (aop && oMin >= 0 && oMax <= 1) sigmoidOpacity = false;  // already a probability
   }
 
+  // splatIndex is a float vertex attribute, so it stops being exact past 2^24.
+  if (N > 16777216) throw new Error(N.toLocaleString() + ' splats is past the 16,777,216 this renderer can index.');
   const maxTex = renderer.capabilities.maxTextureSize || 4096;
+  // texW stays a power of two (and a multiple of 4) so that a splat's 4-texel block never
+  // straddles a row and the shader's divide by blocksPerRow is exact.
   let texW = 2048;
   while (Math.ceil(N * 4 / texW) > maxTex && texW < maxTex) texW *= 2;
   const texH = Math.ceil(N * 4 / texW);
@@ -2469,6 +2491,7 @@ async function loadSplatPly(arrayBuffer, name) {
     uniforms: {
       splatTex: { value: tex },
       texSize: { value: new THREE.Vector2(texW, texH) },
+      blocksPerRow: { value: texW / 4 },
       viewport: { value: new THREE.Vector2(1, 1) },
       focal: { value: new THREE.Vector2(1, 1) },
       opacityScale: { value: parseFloat(document.getElementById('splatOpacity').value) },
@@ -2690,8 +2713,27 @@ function updateSplatViewportUniforms() {
   splat.mat.uniforms.viewport.value.set(el.clientWidth, el.clientHeight);
   splat.mat.uniforms.focal.value.set(f, f);
 }
+// The 1st..99th percentile of splat centres per axis, in PLY space. Trained scenes
+// habitually keep a scatter of far-flung junk splats — this file's centres sit inside
+// about +-40 on X, but a handful reach 600 — so the raw min/max is a useless framing
+// box: it would park the camera a thousand units from a scene a hundred across and
+// show you an empty screen. Percentiles ignore the strays.
+function splatCoreBounds() {
+  const p = splat.positions, N = splat.count;
+  const step = Math.max(1, Math.floor(N / 20000));
+  const cnt = Math.ceil(N / step);
+  const min = [0, 0, 0], max = [0, 0, 0], buf = new Float32Array(cnt);
+  for (let axis = 0; axis < 3; axis++) {
+    for (let k = 0, i = 0; i < N; i += step, k++) buf[k] = p[i * 3 + axis];
+    buf.sort();   // refilled from scratch next axis, so sorting in place is fine
+    min[axis] = buf[Math.floor(0.01 * (cnt - 1))];
+    max[axis] = buf[Math.floor(0.99 * (cnt - 1))];
+  }
+  return { min: min, max: max };
+}
+
 function frameSplats() {
-  const b = splat.bounds, m = splatTransformMatrix();
+  const b = splatCoreBounds(), m = splatTransformMatrix();
   const box = new THREE.Box3(), v = new THREE.Vector3();
   for (let i = 0; i < 8; i++) {
     v.set((i & 1) ? b.max[0] : b.min[0], (i & 2) ? b.max[1] : b.min[1], (i & 4) ? b.max[2] : b.min[2]).applyMatrix4(m);
