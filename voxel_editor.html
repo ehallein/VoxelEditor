@@ -71,6 +71,9 @@
     <div class="btn filebtn">Load .voxel.json + .voxel.bin
       <input id="fileInput" type="file" multiple accept=".json,.bin,.voxel.json,.voxel.bin">
     </div>
+    <div class="btn filebtn">Load splats (.ply)
+      <input id="plyInput" type="file" accept=".ply">
+    </div>
     <button id="exportBtn" disabled>Export edited (.zip)</button>
   </header>
   <div id="left">
@@ -135,6 +138,46 @@
       <div class="row"><label id="clipLabel">off</label><input id="heightClip" type="range" step="0.01"></div>
       <button id="resetClip" class="btn">Reset (show all)</button>
     </section>
+    <section id="splatSection" style="display:none">
+      <h2>Gaussian splats</h2>
+      <div class="hint" id="splatInfo"></div>
+      <div class="row"><label>Show (V)</label><input id="splatShow" type="checkbox" checked></div>
+      <div class="row"><label>Splat α</label><input id="splatOpacity" type="range" min="0" max="1" step="0.01" value="1"></div>
+      <div class="row"><label>Voxel α</label><input id="voxelOpacity" type="range" min="0" max="1" step="0.01" value="1"></div>
+      <div class="hint">Fade the voxels down to see the splats through them — that's the quickest way to judge whether the two line up.</div>
+      <div class="row"><label>Budget</label><input id="splatBudget" type="range" min="2" max="100" step="1" value="100"><span id="splatBudgetVal" style="font-family:var(--mono);font-size:11px;width:62px;text-align:right"></span></div>
+      <div class="row"><label>Height clip</label><input id="splatClip" type="checkbox" checked></div>
+      <div class="hint">Apply the height-clip slider to the splats as well, so both views are cut at the same plane.</div>
+    </section>
+    <section id="splatAlignSection" style="display:none">
+      <h2>Splat alignment</h2>
+      <div class="hint">PLY axes → voxel world axes. The default (flip X, flip Y) is what splat-transform's voxelizer produced for the file this was built against; it rotates the scene internally before voxelizing.</div>
+      <div class="row"><label>Axis order</label>
+        <select id="splatPerm">
+          <option value="012">X Y Z</option>
+          <option value="021">X Z Y</option>
+          <option value="102">Y X Z</option>
+          <option value="120">Y Z X</option>
+          <option value="201">Z X Y</option>
+          <option value="210">Z Y X</option>
+        </select>
+      </div>
+      <div class="row"><label>Flip</label>
+        <span style="font-size:12px">X<input id="splatFlipX" type="checkbox" checked></span>
+        <span style="font-size:12px">Y<input id="splatFlipY" type="checkbox" checked></span>
+        <span style="font-size:12px">Z<input id="splatFlipZ" type="checkbox"></span>
+      </div>
+      <div class="row"><label>Offset X</label><input id="splatOffX" type="number" step="0.1" value="0"></div>
+      <div class="row"><label>Offset Y</label><input id="splatOffY" type="number" step="0.1" value="0"></div>
+      <div class="row"><label>Offset Z</label><input id="splatOffZ" type="number" step="0.1" value="0"></div>
+      <div class="row"><label>Scale</label><input id="splatScale" type="number" step="0.01" value="1"></div>
+      <div class="toolgrid">
+        <button id="splatAutoAlign" class="primary">Auto-align</button>
+        <button id="splatCheck" class="btn">Re-check match</button>
+      </div>
+      <button id="splatResetAlign" class="btn">Reset alignment</button>
+      <div class="hint" id="splatMatch"></div>
+    </section>
     <section id="editSection" style="display:none">
       <h2>Edit</h2>
       <div class="toolgrid">
@@ -156,7 +199,7 @@
       <canvas id="minimap" width="260" height="260"></canvas>
     </div>
     <div id="overlay"></div>
-    <div id="dropHint"><b>No terrain loaded</b><span>Use "Load .voxel.json + .voxel.bin" above — select both files at once.</span></div>
+    <div id="dropHint"><b>No terrain loaded</b><span>Use "Load .voxel.json + .voxel.bin" above — select both files at once.<br>"Load splats (.ply)" overlays the Gaussian-splat scene the voxels came from.</span></div>
     <div id="progress"><div id="progressLabel">Working…</div><div class="bar"><div id="progressBar"></div></div></div>
   </div>
 </div>
@@ -521,6 +564,7 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
   document.getElementById('flattenSection').style.display = 'flex';
   document.getElementById('clipSection').style.display = 'flex';
   document.getElementById('dropHint').style.display = 'none';
+  if (splat.count) { document.getElementById('splatAlignSection').style.display = 'flex'; checkSplatMatch(); }
 
   // height-clip slider spans the grid's world Y range; start with everything visible
   const clipEl = document.getElementById('heightClip');
@@ -552,6 +596,10 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
    ====================================================================== */
 const CHUNK = 16; // voxels per chunk edge
 let scene, camera, renderer, chunkGroup;
+// One material shared by every chunk (and one for the overview mesh) so the splat
+// panel's "Voxel α" slider can fade the whole voxel surface in one assignment.
+const chunkMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+const overviewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
 const chunkMeshes = new Map(); // key "cx,cy,cz" -> THREE.Mesh
 let streamTimer = 0;
 
@@ -594,6 +642,7 @@ function resize() {
   const w = el.clientWidth, h = el.clientHeight;
   camera.aspect = w / h; camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  updateSplatViewportUniforms();
 }
 
 function heightColor(y) {
@@ -666,8 +715,7 @@ function buildChunk(cx, cy, cz) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(geo, chunkMaterial);
   mesh.userData.chunk = [cx, cy, cz];
   chunkGroup.add(mesh);
   chunkMeshes.set(key, mesh);
@@ -679,7 +727,7 @@ function buildChunk(cx, cy, cz) {
    solid region is already stored as one big node, so it renders as one big box for free. ---- */
 let overviewMesh = null;
 function disposeOverview() {
-  if (overviewMesh) { scene.remove(overviewMesh); overviewMesh.geometry.dispose(); overviewMesh.material.dispose(); overviewMesh = null; }
+  if (overviewMesh) { scene.remove(overviewMesh); overviewMesh.geometry.dispose(); overviewMesh = null; } // material is shared, keep it
 }
 function buildOverviewMesh() {
   disposeOverview();
@@ -725,8 +773,7 @@ function buildOverviewMesh() {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  overviewMesh = new THREE.Mesh(geo, mat);
+  overviewMesh = new THREE.Mesh(geo, overviewMaterial);
   scene.add(overviewMesh);
 }
 function frameWholeModel() {
@@ -1365,8 +1412,8 @@ document.getElementById('resetClip').addEventListener('click', () => {
 /* ---- main loop ---- */
 function loop() {
   requestAnimationFrame(loop);
-  if (state.loaded) {
-    const res = state.meta.voxelResolution;
+  if (state.loaded || splat.count > 0) {
+    const res = state.loaded ? state.meta.voxelResolution : 0.1;
     const speed = res * 40 * (1/60) * 6;
     const fwd = new THREE.Vector3(Math.sin(camState.azimuth), 0, Math.cos(camState.azimuth));
     const right = new THREE.Vector3(fwd.z, 0, -fwd.x);
@@ -1383,8 +1430,10 @@ function loop() {
     flushDirty();
     document.getElementById('overlay').innerHTML =
       'focus <b>' + state.focus.x.toFixed(1) + ', ' + state.focus.y.toFixed(1) + ', ' + state.focus.z.toFixed(1) + '</b><br>' +
-      'tool <b>' + state.tool + '</b> · brush Ø <b>' + state.brushWidth + '×' + state.brushHeight + '</b>';
+      'tool <b>' + state.tool + '</b> · brush Ø <b>' + state.brushWidth + '×' + state.brushHeight + '</b>' +
+      (splat.count ? '<br>splats <b>' + (splat.mesh && splat.mesh.visible ? splat.drawCount.toLocaleString() : 'hidden') + '</b>' : '');
   }
+  updateSplats();
   renderer.render(scene, camera);
 }
 
@@ -1437,8 +1486,659 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   }
 });
 
+/* ======================================================================
+   PART 6 — Gaussian splat rendering (.ply)
+
+   Draws a 3D-Gaussian-splat .ply in the *same* world space as the voxel
+   grid, so you can see whether the voxels still match the scene they were
+   trained from.
+
+   Data layout: every splat is 4 RGBA texels in one float texture (centre +
+   opacity, then the 6 upper-triangle terms of its 3D covariance, then
+   colour). The only per-instance attribute is a float index into that
+   texture, so a re-sort re-uploads 4 bytes per splat instead of the whole
+   64-byte record. Depth order is a 16-bit counting sort, in a worker when
+   the page is allowed one and inline otherwise, re-run whenever the view
+   has moved enough to matter.
+
+   Rendering is the usual EWA splat: project the 3D covariance with the
+   perspective Jacobian, use the resulting 2D covariance's eigenvectors as
+   the axes of a screen-space quad, and fall off as exp(-r²) inside it.
+   Alpha is premultiplied and blended back-to-front; depth *testing* is on
+   (so the voxel surface occludes splats behind it) but depth *writing* is
+   off (so splats don't occlude each other's quads).
+   ====================================================================== */
+const SH_C0 = 0.28209479177387814;
+
+const splat = {
+  group: null, mesh: null, mat: null, tex: null, geo: null, idxAttr: null,
+  count: 0, drawCount: 0, positions: null, bounds: null, name: '',
+  // Alignment of PLY space -> voxel world space. The default (-x, -y, z) is what
+  // splat-transform's voxelizer produced for the terrain this was built against
+  // — splat-transform evidently rotates the scene 180° about Z before voxelizing.
+  // It was found by scoring all 48 signed axis permutations against the octree's
+  // own occupancy — 99.7% of splats inside solid voxels, vs 68% for the runner-up —
+  // not assumed. "Auto-align" re-runs exactly that search for any other file.
+  perm: [0, 1, 2], sign: [-1, -1, 1], offset: [0, 0, 0], scale: 1,
+  worker: null, sortBusy: false, sortToken: 0, lastKey: null,
+};
+
+/* ---- PLY parsing ---- */
+const PLY_TYPE_SIZE = {
+  char: 1, uchar: 1, int8: 1, uint8: 1, short: 2, ushort: 2, int16: 2, uint16: 2,
+  int: 4, uint: 4, int32: 4, uint32: 4, float: 4, float32: 4, double: 8, float64: 8,
+};
+function plyReader(dv, type) {
+  switch (type) {
+    case 'char': case 'int8': return (o) => dv.getInt8(o);
+    case 'uchar': case 'uint8': return (o) => dv.getUint8(o);
+    case 'short': case 'int16': return (o) => dv.getInt16(o, true);
+    case 'ushort': case 'uint16': return (o) => dv.getUint16(o, true);
+    case 'int': case 'int32': return (o) => dv.getInt32(o, true);
+    case 'uint': case 'uint32': return (o) => dv.getUint32(o, true);
+    case 'float': case 'float32': return (o) => dv.getFloat32(o, true);
+    case 'double': case 'float64': return (o) => dv.getFloat64(o, true);
+  }
+  return null;
+}
+function parsePlyHeader(bytes) {
+  const max = Math.min(bytes.length, 1 << 17);
+  let s = '';
+  for (let i = 0; i < max; i++) s += String.fromCharCode(bytes[i]);
+  const m = s.indexOf('end_header');
+  if (s.slice(0, 3) !== 'ply' || m < 0) throw new Error('Not a PLY file (no end_header found).');
+  const nl = s.indexOf('\n', m);
+  const header = { format: '', elements: [], dataStart: nl + 1 };
+  let cur = null;
+  for (const raw of s.slice(0, nl).split(/\r?\n/)) {
+    const t = raw.trim().split(/\s+/);
+    if (t[0] === 'format') header.format = t[1];
+    else if (t[0] === 'element') { cur = { name: t[1], count: parseInt(t[2], 10), props: [] }; header.elements.push(cur); }
+    else if (t[0] === 'property' && cur) cur.props.push(t[1] === 'list' ? { list: true, name: t[4] } : { type: t[1], name: t[2] });
+  }
+  return header;
+}
+
+/* ---- depth sort, shared by the worker and the inline fallback ----
+   Back-to-front == ascending view-space Z, because Z is negative in front of the
+   camera, so the farthest splat has the smallest Z. 16-bit buckets are plenty:
+   the error is a fraction of the depth range, well below splat size. */
+function sortOrder(pos, mv, stride, out) {
+  const cnt = out.length;
+  const fd = new Float32Array(cnt);
+  const m2 = mv[2], m6 = mv[6], m10 = mv[10], m14 = mv[14];
+  let mn = Infinity, mx = -Infinity;
+  for (let k = 0, i = 0; k < cnt; k++, i += stride) {
+    const o = i * 3;
+    const d = m2 * pos[o] + m6 * pos[o + 1] + m10 * pos[o + 2] + m14;
+    fd[k] = d;
+    if (d < mn) mn = d;
+    if (d > mx) mx = d;
+  }
+  const B = 65536;
+  const scale = mx > mn ? (B - 1) / (mx - mn) : 0;
+  const counts = new Uint32Array(B);
+  const bucket = new Uint16Array(cnt);
+  for (let k = 0; k < cnt; k++) { const b = ((fd[k] - mn) * scale) | 0; bucket[k] = b; counts[b]++; }
+  let sum = 0;
+  for (let b = 0; b < B; b++) { const c = counts[b]; counts[b] = sum; sum += c; }
+  for (let k = 0; k < cnt; k++) out[counts[bucket[k]]++] = k * stride;
+}
+
+const SPLAT_VS = [
+  'precision highp float;',
+  'attribute float splatIndex;',
+  'uniform sampler2D splatTex;',
+  'uniform vec2 texSize;',
+  'uniform vec2 viewport;',
+  'uniform vec2 focal;',
+  'uniform float opacityScale;',
+  'uniform float clipY;',
+  'varying vec4 vColor;',
+  'varying vec2 vQuad;',
+  'vec4 fetchTexel(float t) {',
+  '  float x = mod(t, texSize.x);',
+  '  float y = floor(t / texSize.x);',
+  '  return texture2D(splatTex, (vec2(x, y) + 0.5) / texSize);',
+  '}',
+  'void main() {',
+  '  float t0 = splatIndex * 4.0;',
+  '  vec4 a   = fetchTexel(t0);',
+  '  vec4 c1  = fetchTexel(t0 + 1.0);',
+  '  vec4 c2  = fetchTexel(t0 + 2.0);',
+  '  vec4 rgb = fetchTexel(t0 + 3.0);',
+  '  vColor = vec4(rgb.rgb, a.w * opacityScale);',
+  '  vQuad = position.xy;',
+  '  vec4 centre = vec4(a.xyz, 1.0);',
+  '  if ((modelMatrix * centre).y > clipY) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }',
+  '  vec4 cam = modelViewMatrix * centre;',
+  '  if (cam.z > -0.02) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }',
+  '  vec4 clip = projectionMatrix * cam;',
+  '  vec2 ndc = clip.xy / clip.w;',
+  '  if (abs(ndc.x) > 1.4 || abs(ndc.y) > 1.4) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }',
+  '  mat3 Vrk = mat3(c1.x, c1.y, c1.z,',   // symmetric: [xx xy xz; xy yy yz; xz yz zz]
+  '                  c1.y, c2.x, c2.y,',
+  '                  c1.z, c2.y, c2.z);',
+  '  float zi = 1.0 / cam.z;',
+  '  float zi2 = zi * zi;',
+  '  mat3 J = mat3(-focal.x * zi, 0.0, 0.0,',
+  '                0.0, -focal.y * zi, 0.0,',
+  '                focal.x * cam.x * zi2, focal.y * cam.y * zi2, 0.0);',
+  '  mat3 W = mat3(modelViewMatrix[0].xyz, modelViewMatrix[1].xyz, modelViewMatrix[2].xyz);',
+  '  mat3 T = J * W;',
+  // cov2d = T * Vrk * transpose(T); transpose() does not exist in GLSL ES 1.00
+  '  mat3 Tt = mat3(T[0][0], T[1][0], T[2][0],',
+  '                 T[0][1], T[1][1], T[2][1],',
+  '                 T[0][2], T[1][2], T[2][2]);',
+  '  mat3 cov2d = T * Vrk * Tt;',
+  '  float a11 = cov2d[0][0] + 0.3;',   // low-pass: a sub-pixel splat still covers a pixel
+  '  float a12 = cov2d[0][1];',
+  '  float a22 = cov2d[1][1] + 0.3;',
+  '  float mid = 0.5 * (a11 + a22);',
+  '  float rad = sqrt(max(mid * mid - (a11 * a22 - a12 * a12), 0.01));',
+  '  float l1 = mid + rad;',
+  '  float l2 = max(mid - rad, 0.05);',
+  '  if (l1 < 0.15) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }',
+  '  vec2 major = (abs(a12) < 1e-6) ? (a11 >= a22 ? vec2(1.0, 0.0) : vec2(0.0, 1.0))',
+  '                                 : normalize(vec2(a12, l1 - a11));',
+  '  vec2 v1 = min(sqrt(2.0 * l1), 1024.0) * major;',
+  '  vec2 v2 = min(sqrt(2.0 * l2), 1024.0) * vec2(major.y, -major.x);',
+  '  vec2 offs = (position.x * v1 + position.y * v2) / viewport * 2.0;',
+  // keep the centre's clip-space depth, so voxel geometry can occlude the splat
+  '  gl_Position = vec4(ndc + offs, clip.z / clip.w, 1.0);',
+  '}',
+].join('\n');
+
+const SPLAT_FS = [
+  'precision highp float;',
+  'varying vec4 vColor;',
+  'varying vec2 vQuad;',
+  'void main() {',
+  '  float A = -dot(vQuad, vQuad);',
+  '  if (A < -4.0) discard;',
+  '  float alpha = exp(A) * vColor.a;',
+  '  if (alpha < 0.004) discard;',
+  '  gl_FragColor = vec4(vColor.rgb * alpha, alpha);',  // premultiplied
+  '}',
+].join('\n');
+
+function disposeSplats() {
+  if (splat.mesh) { splat.group.remove(splat.mesh); splat.mesh.geometry.dispose(); }
+  if (splat.mat) splat.mat.dispose();
+  if (splat.tex) splat.tex.dispose();
+  if (splat.worker) { splat.worker.terminate(); splat.worker = null; }
+  splat.mesh = null; splat.mat = null; splat.tex = null; splat.geo = null;
+  splat.idxAttr = null; splat.count = 0; splat.drawCount = 0; splat.positions = null;
+  splat.sortBusy = false; splat.lastKey = null;
+}
+
+async function loadSplatPly(arrayBuffer, name) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const header = parsePlyHeader(bytes);
+  if (!/binary_little_endian/.test(header.format))
+    throw new Error('Only binary_little_endian PLY is supported (this one is "' + header.format + '").');
+  if (header.elements.some(e => e.name === 'chunk'))
+    throw new Error('This looks like a PlayCanvas compressed .ply — re-export it uncompressed.');
+
+  let offset = header.dataStart, vert = null;
+  for (const el of header.elements) {
+    let stride = 0;
+    for (const p of el.props) {
+      if (p.list) throw new Error('PLY list properties are not supported (element "' + el.name + '").');
+      const sz = PLY_TYPE_SIZE[p.type];
+      if (!sz) throw new Error('Unknown PLY property type "' + p.type + '".');
+      p.offset = stride; stride += sz;
+    }
+    el.stride = stride; el.dataOffset = offset;
+    offset += stride * el.count;
+    if (el.name === 'vertex') { vert = el; break; }
+  }
+  if (!vert) throw new Error('No "vertex" element in this PLY.');
+  if (vert.dataOffset + vert.stride * vert.count > bytes.length)
+    throw new Error('PLY is truncated (the header promises more vertices than the file holds).');
+
+  const dv = new DataView(arrayBuffer);
+  const byName = {};
+  for (const p of vert.props) byName[p.name] = p;
+  const acc = (n) => { const p = byName[n]; if (!p) return null; const r = plyReader(dv, p.type); return (b) => r(b + p.offset); };
+  const ax = acc('x'), ay = acc('y'), az = acc('z');
+  if (!ax || !ay || !az) throw new Error('PLY has no x/y/z vertex properties.');
+  const asx = acc('scale_0'), asy = acc('scale_1'), asz = acc('scale_2');
+  const arw = acc('rot_0'), arx = acc('rot_1'), ary = acc('rot_2'), arz = acc('rot_3');
+  const aop = acc('opacity');
+  const adc = [acc('f_dc_0'), acc('f_dc_1'), acc('f_dc_2')];
+  const argb = [acc('red'), acc('green'), acc('blue')];
+  const N = vert.count;
+  if (N === 0) throw new Error('PLY contains no vertices.');
+
+  // Activation heuristics. 3DGS writes log-scale / logit-opacity / SH DC colour, but
+  // some exporters write already-activated values — decide from a sample, don't assume.
+  let logScale = true, sigmoidOpacity = true;
+  {
+    const probe = Math.min(N, 2000), st = Math.max(1, Math.floor(N / probe));
+    let sMin = Infinity, oMin = Infinity, oMax = -Infinity;
+    for (let i = 0; i < N; i += st) {
+      const b = vert.dataOffset + i * vert.stride;
+      if (asx) sMin = Math.min(sMin, asx(b), asy(b), asz(b));
+      if (aop) { const o = aop(b); oMin = Math.min(oMin, o); oMax = Math.max(oMax, o); }
+    }
+    if (asx && sMin >= 0) logScale = false;                     // no negatives -> already metres
+    if (aop && oMin >= 0 && oMax <= 1) sigmoidOpacity = false;  // already a probability
+  }
+
+  const maxTex = renderer.capabilities.maxTextureSize || 4096;
+  let texW = 2048;
+  while (Math.ceil(N * 4 / texW) > maxTex && texW < maxTex) texW *= 2;
+  const texH = Math.ceil(N * 4 / texW);
+  if (texH > maxTex) throw new Error(N.toLocaleString() + ' splats is more than this GPU can hold in one texture.');
+  if (!renderer.capabilities.isWebGL2 && !renderer.extensions.get('OES_texture_float'))
+    throw new Error('Splat rendering needs WebGL2 or the OES_texture_float extension.');
+
+  const data = new Float32Array(texW * texH * 4);
+  const positions = new Float32Array(N * 3);
+  const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+
+  showProgress('Reading ' + name + '…');
+  const BATCH = 50000;
+  for (let i0 = 0; i0 < N; i0 += BATCH) {
+    const i1 = Math.min(N, i0 + BATCH);
+    for (let i = i0; i < i1; i++) {
+      const b = vert.dataOffset + i * vert.stride;
+      const x = ax(b), y = ay(b), z = az(b);
+      positions[i * 3] = x; positions[i * 3 + 1] = y; positions[i * 3 + 2] = z;
+      if (x < bounds.min[0]) bounds.min[0] = x; if (x > bounds.max[0]) bounds.max[0] = x;
+      if (y < bounds.min[1]) bounds.min[1] = y; if (y > bounds.max[1]) bounds.max[1] = y;
+      if (z < bounds.min[2]) bounds.min[2] = z; if (z > bounds.max[2]) bounds.max[2] = z;
+
+      let sx = 0.01, sy = 0.01, sz = 0.01;
+      if (asx) {
+        sx = asx(b); sy = asy(b); sz = asz(b);
+        if (logScale) { sx = Math.exp(sx); sy = Math.exp(sy); sz = Math.exp(sz); }
+      }
+      let qw = 1, qx = 0, qy = 0, qz = 0;
+      if (arw) {
+        qw = arw(b); qx = arx(b); qy = ary(b); qz = arz(b);
+        const n = Math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) || 1;
+        qw /= n; qx /= n; qy /= n; qz /= n;
+      }
+      // M = R(q) * diag(scale); covariance = M * Mᵀ (stored as its upper triangle)
+      const m00 = (1 - 2 * (qy * qy + qz * qz)) * sx, m01 = (2 * (qx * qy - qw * qz)) * sy, m02 = (2 * (qx * qz + qw * qy)) * sz;
+      const m10 = (2 * (qx * qy + qw * qz)) * sx, m11 = (1 - 2 * (qx * qx + qz * qz)) * sy, m12 = (2 * (qy * qz - qw * qx)) * sz;
+      const m20 = (2 * (qx * qz - qw * qy)) * sx, m21 = (2 * (qy * qz + qw * qx)) * sy, m22 = (1 - 2 * (qx * qx + qy * qy)) * sz;
+
+      let op = 1;
+      if (aop) { op = aop(b); if (sigmoidOpacity) op = 1 / (1 + Math.exp(-op)); }
+      let r = 1, g = 1, bl = 1;
+      if (adc[0]) {
+        r = 0.5 + SH_C0 * adc[0](b); g = 0.5 + SH_C0 * adc[1](b); bl = 0.5 + SH_C0 * adc[2](b);
+      } else if (argb[0]) {
+        const d = (byName.red.type === 'uchar' || byName.red.type === 'uint8') ? 255 : 1;
+        r = argb[0](b) / d; g = argb[1](b) / d; bl = argb[2](b) / d;
+      }
+
+      const t = i * 16;
+      data[t] = x; data[t + 1] = y; data[t + 2] = z; data[t + 3] = Math.min(1, Math.max(0, op));
+      data[t + 4] = m00 * m00 + m01 * m01 + m02 * m02;
+      data[t + 5] = m00 * m10 + m01 * m11 + m02 * m12;
+      data[t + 6] = m00 * m20 + m01 * m21 + m02 * m22;
+      data[t + 8] = m10 * m10 + m11 * m11 + m12 * m12;
+      data[t + 9] = m10 * m20 + m11 * m21 + m12 * m22;
+      data[t + 10] = m20 * m20 + m21 * m21 + m22 * m22;
+      data[t + 12] = Math.min(1, Math.max(0, r));
+      data[t + 13] = Math.min(1, Math.max(0, g));
+      data[t + 14] = Math.min(1, Math.max(0, bl));
+    }
+    setProgress(i1 / N);
+    await nextTick();
+  }
+
+  disposeSplats();
+  splat.count = N; splat.positions = positions; splat.bounds = bounds; splat.name = name;
+
+  const tex = new THREE.DataTexture(data, texW, texH, THREE.RGBAFormat, THREE.FloatType);
+  tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false; tex.needsUpdate = true;
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      splatTex: { value: tex },
+      texSize: { value: new THREE.Vector2(texW, texH) },
+      viewport: { value: new THREE.Vector2(1, 1) },
+      focal: { value: new THREE.Vector2(1, 1) },
+      opacityScale: { value: parseFloat(document.getElementById('splatOpacity').value) },
+      clipY: { value: 1e9 },
+    },
+    vertexShader: SPLAT_VS, fragmentShader: SPLAT_FS,
+    transparent: true, depthTest: true, depthWrite: false,
+    // the quad's axes are (major axis, its perpendicular), which reverses the winding
+    // half the time — with the default FrontSide every splat would be back-face culled
+    side: THREE.DoubleSide,
+    blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+  });
+
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([-2, -2, 0, 2, -2, 0, 2, 2, 0, -2, 2, 0], 3));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  const idxAttr = new THREE.InstancedBufferAttribute(new Float32Array(N), 1);
+  idxAttr.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < N; i++) idxAttr.array[i] = i;   // file order until the first sort lands
+  geo.setAttribute('splatIndex', idxAttr);
+  geo.instanceCount = N;
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e9);
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.raycast = () => {};   // never a brush target
+  mesh.renderOrder = -1;     // draw before any see-through voxel chunks
+  mesh.visible = document.getElementById('splatShow').checked;
+  splat.group.add(mesh);
+  splat.mesh = mesh; splat.mat = mat; splat.tex = tex; splat.geo = geo; splat.idxAttr = idxAttr;
+  splat.drawCount = N;
+
+  // Sorter: a worker if the page is allowed to create one (a Blob worker is blocked
+  // under some strict CSPs), otherwise the same sort runs inline on the main thread.
+  try {
+    const src = sortOrder.toString() + '\n' +
+      'let POS = null;\n' +
+      'self.onmessage = function (e) {\n' +
+      '  const d = e.data;\n' +
+      '  if (d.type === "data") { POS = new Float32Array(d.positions); return; }\n' +
+      '  const cnt = Math.ceil((POS.length / 3) / d.stride);\n' +
+      '  const out = new Float32Array(cnt);\n' +
+      '  sortOrder(POS, d.mv, d.stride, out);\n' +
+      '  self.postMessage({ order: out, token: d.token }, [out.buffer]);\n' +
+      '};';
+    const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    w.onmessage = (e) => {
+      splat.sortBusy = false;
+      if (!splat.idxAttr || e.data.token !== splat.sortToken) return;
+      applySortedOrder(e.data.order);
+    };
+    w.onerror = () => { if (splat.worker) { splat.worker.terminate(); splat.worker = null; } splat.sortBusy = false; };
+    const copy = positions.slice();
+    w.postMessage({ type: 'data', positions: copy.buffer }, [copy.buffer]);
+    splat.worker = w;
+  } catch (err) {
+    splat.worker = null;
+  }
+
+  hideProgress();
+  applySplatTransform();
+  updateSplatUIAfterLoad();
+}
+
+function applySortedOrder(order) {
+  splat.idxAttr.array.set(order);
+  splat.drawCount = order.length;
+  splat.geo.instanceCount = order.length;
+  splat.idxAttr.needsUpdate = true;
+}
+
+function splatStride() {
+  // the slider is a percentage of the file, so 100% is always exactly stride 1
+  const pct = parseInt(document.getElementById('splatBudget').value, 10) / 100;
+  return Math.max(1, Math.round(1 / Math.max(0.01, pct)));
+}
+function splatBudgetLabel() {
+  const shown = Math.ceil(splat.count / splatStride());
+  return shown.toLocaleString() + (shown < splat.count ? ' (1 in ' + splatStride() + ')' : ' (all)');
+}
+
+/* PLY space -> voxel world space: axis permutation, per-axis flip, uniform scale,
+   then translation. It lives on the group's matrix, so the shader picks it up through
+   modelViewMatrix — covariances rotate/flip with it for free. */
+function splatTransformMatrix() {
+  const r = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let k = 0; k < 3; k++) r[k][splat.perm[k]] = splat.sign[k] * splat.scale;
+  const m = new THREE.Matrix4();
+  m.set(r[0][0], r[0][1], r[0][2], splat.offset[0],
+        r[1][0], r[1][1], r[1][2], splat.offset[1],
+        r[2][0], r[2][1], r[2][2], splat.offset[2],
+        0, 0, 0, 1);
+  return m;
+}
+function applySplatTransform() {
+  if (!splat.group) return;
+  splat.group.matrixAutoUpdate = false;
+  splat.group.matrix.copy(splatTransformMatrix());
+  splat.group.updateMatrixWorld(true);
+  splat.lastKey = null; // the depth order is no longer valid
+}
+
+/* ---- "do the voxels still match the scene?" — the fraction of sampled splat
+   centres that land inside a solid voxel. Shown as a number, and used as the
+   objective that auto-align maximises. ---- */
+function splatSample(maxCount) {
+  const st = Math.max(1, Math.floor(splat.count / maxCount));
+  const out = [];
+  for (let i = 0; i < splat.count; i += st) out.push(i);
+  return out;
+}
+function splatMatchFraction(sample, perm, sign, offset) {
+  const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
+  const p = splat.positions, s = splat.scale;
+  let hit = 0;
+  for (let k = 0; k < sample.length; k++) {
+    const o = sample[k] * 3;
+    const wx = sign[0] * p[o + perm[0]] * s + offset[0];
+    const wy = sign[1] * p[o + perm[1]] * s + offset[1];
+    const wz = sign[2] * p[o + perm[2]] * s + offset[2];
+    if (getV(Math.floor((wx - gb.min[0]) / res), Math.floor((wy - gb.min[1]) / res), Math.floor((wz - gb.min[2]) / res))) hit++;
+  }
+  return hit / sample.length;
+}
+function reportSplatMatch(frac, sampleN, note) {
+  document.getElementById('splatMatch').innerHTML =
+    '<span class="flag ' + (frac > 0.8 ? 'ok' : 'bad') + '">' + (frac * 100).toFixed(1) + '% match</span><br>' +
+    'of ' + sampleN.toLocaleString() + ' sampled splat centres land inside a solid voxel.' +
+    (note ? '<br>' + note : '');
+}
+function checkSplatMatch() {
+  if (!state.loaded || !splat.count) return;
+  const sample = splatSample(6000);
+  reportSplatMatch(splatMatchFraction(sample, splat.perm, splat.sign, splat.offset), sample.length, '');
+}
+
+const SPLAT_PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+async function autoAlignSplats() {
+  if (!state.loaded) { alert('Load the .voxel.json + .voxel.bin first — auto-align works by scoring the splats against the voxels.'); return; }
+  if (!splat.count) return;
+  showProgress('Searching for the alignment…');
+  await nextTick();
+  const sample = splatSample(4000);
+  const before = splatMatchFraction(sample, splat.perm, splat.sign, splat.offset);
+
+  // 1. every signed axis permutation (6 orders x 8 sign combinations), no offset
+  let best = { perm: splat.perm, sign: splat.sign, f: -1 };
+  for (let pi = 0; pi < SPLAT_PERMS.length; pi++) {
+    for (let s = 0; s < 8; s++) {
+      const sign = [(s & 1) ? -1 : 1, (s & 2) ? -1 : 1, (s & 4) ? -1 : 1];
+      const f = splatMatchFraction(sample, SPLAT_PERMS[pi], sign, [0, 0, 0]);
+      if (f > best.f) best = { perm: SPLAT_PERMS[pi], sign: sign, f: f };
+    }
+    setProgress((pi + 1) / (SPLAT_PERMS.length + 3));
+    await nextTick();
+  }
+
+  // 2. coordinate descent on the translation, coarse to fine
+  const off = [0, 0, 0];
+  const steps = [2, 0.5, 0.1];
+  for (let si = 0; si < steps.length; si++) {
+    for (let pass = 0; pass < 3; pass++) {
+      let improved = false;
+      for (let axis = 0; axis < 3; axis++) {
+        for (const d of [steps[si], -steps[si]]) {
+          const trial = off.slice(); trial[axis] += d;
+          const f = splatMatchFraction(sample, best.perm, best.sign, trial);
+          if (f > best.f + 1e-6) { best.f = f; off[axis] = trial[axis]; improved = true; }
+        }
+      }
+      if (!improved) break;
+    }
+    setProgress((SPLAT_PERMS.length + si + 1) / (SPLAT_PERMS.length + 3));
+    await nextTick();
+  }
+
+  splat.perm = best.perm; splat.sign = best.sign; splat.offset = off;
+  applySplatTransform();
+  syncSplatAlignUI();
+  hideProgress();
+  reportSplatMatch(best.f, sample.length, 'Was ' + (before * 100).toFixed(1) + '% before auto-align.');
+}
+
+/* ---- per frame: uniforms, and a re-sort once the view has moved enough ---- */
+const _mvSplat = new THREE.Matrix4();
+function updateSplats() {
+  if (!splat.mesh) return;
+  const u = splat.mat.uniforms;
+  u.clipY.value = (state.loaded && document.getElementById('splatClip').checked &&
+                   state.heightClip !== null && state.heightClip !== undefined) ? state.heightClip : 1e9;
+  if (!splat.mesh.visible) return;
+
+  camera.updateMatrixWorld();
+  _mvSplat.copy(camera.matrixWorld).invert().multiply(splat.mesh.matrixWorld);
+  const e = _mvSplat.elements, k = splat.lastKey;
+  const moved = !k ||
+    Math.abs(e[2] - k[0]) + Math.abs(e[6] - k[1]) + Math.abs(e[10] - k[2]) > 0.004 ||
+    Math.abs(e[14] - k[3]) > 0.25;
+  if (!moved || splat.sortBusy) return;
+  splat.lastKey = [e[2], e[6], e[10], e[14]];
+  splat.sortToken++;
+  const stride = splatStride();
+  if (splat.worker) {
+    splat.sortBusy = true;
+    splat.worker.postMessage({ type: 'sort', mv: Array.from(e), stride: stride, token: splat.sortToken });
+  } else {
+    const out = new Float32Array(Math.ceil(splat.count / stride));
+    sortOrder(splat.positions, e, stride, out);
+    applySortedOrder(out);
+  }
+}
+function updateSplatViewportUniforms() {
+  if (!splat.mat) return;
+  const el = document.getElementById('main');
+  const f = 0.5 * el.clientHeight / Math.tan(camera.fov * Math.PI / 360);
+  splat.mat.uniforms.viewport.value.set(el.clientWidth, el.clientHeight);
+  splat.mat.uniforms.focal.value.set(f, f);
+}
+function frameSplats() {
+  const b = splat.bounds, m = splatTransformMatrix();
+  const box = new THREE.Box3(), v = new THREE.Vector3();
+  for (let i = 0; i < 8; i++) {
+    v.set((i & 1) ? b.max[0] : b.min[0], (i & 2) ? b.max[1] : b.min[1], (i & 4) ? b.max[2] : b.min[2]).applyMatrix4(m);
+    box.expandByPoint(v);
+  }
+  box.getCenter(state.focus);
+  camState.distance = box.getSize(v).length() / Math.sin((camera.fov * Math.PI / 180) / 2) * 0.55;
+}
+
+/* ---- UI ---- */
+function syncSplatAlignUI() {
+  document.getElementById('splatPerm').value = splat.perm.join('');
+  document.getElementById('splatFlipX').checked = splat.sign[0] < 0;
+  document.getElementById('splatFlipY').checked = splat.sign[1] < 0;
+  document.getElementById('splatFlipZ').checked = splat.sign[2] < 0;
+  document.getElementById('splatOffX').value = +splat.offset[0].toFixed(3);
+  document.getElementById('splatOffY').value = +splat.offset[1].toFixed(3);
+  document.getElementById('splatOffZ').value = +splat.offset[2].toFixed(3);
+  document.getElementById('splatScale').value = splat.scale;
+}
+function readSplatAlignUI() {
+  splat.perm = document.getElementById('splatPerm').value.split('').map(Number);
+  splat.sign = [
+    document.getElementById('splatFlipX').checked ? -1 : 1,
+    document.getElementById('splatFlipY').checked ? -1 : 1,
+    document.getElementById('splatFlipZ').checked ? -1 : 1,
+  ];
+  splat.offset = ['splatOffX', 'splatOffY', 'splatOffZ'].map(id => parseFloat(document.getElementById(id).value) || 0);
+  splat.scale = parseFloat(document.getElementById('splatScale').value) || 1;
+  applySplatTransform();
+}
+function updateSplatUIAfterLoad() {
+  document.getElementById('splatBudgetVal').textContent = splatBudgetLabel();
+  document.getElementById('splatSection').style.display = 'flex';
+  document.getElementById('splatAlignSection').style.display = 'flex';
+  document.getElementById('splatInfo').innerHTML =
+    '<b>' + splat.name + '</b><br>' + splat.count.toLocaleString() + ' splats · V toggles them';
+  document.getElementById('dropHint').style.display = 'none';
+  syncSplatAlignUI();
+  updateSplatViewportUniforms();
+  if (state.loaded) checkSplatMatch();
+  else {
+    frameSplats();
+    document.getElementById('splatMatch').innerHTML =
+      'Load the voxel files too, then press Auto-align to check how well they line up.';
+  }
+}
+function setVoxelOpacity(o) {
+  const opaque = o >= 0.999;
+  for (const m of [chunkMaterial, overviewMaterial]) {
+    m.opacity = o;
+    m.transparent = !opaque;
+    m.depthWrite = opaque;   // see-through voxels must not hide the splats behind them
+    m.needsUpdate = true;
+  }
+}
+
+function initSplats() {
+  splat.group = new THREE.Group();
+  scene.add(splat.group);
+
+  document.getElementById('plyInput').addEventListener('change', async (e) => {
+    const file = (e.target.files || [])[0];
+    if (!file) return;
+    document.getElementById('status').textContent = 'reading ' + file.name + '…';
+    try {
+      await loadSplatPly(await file.arrayBuffer(), file.name);
+      document.getElementById('status').textContent = file.name + ' · ' + splat.count.toLocaleString() + ' splats';
+    } catch (err) {
+      hideProgress();
+      document.getElementById('status').textContent = 'splat load failed';
+      document.getElementById('splatSection').style.display = 'flex';
+      document.getElementById('splatInfo').innerHTML =
+        '<span class="flag bad">' + (err && err.message ? err.message : err) + '</span>';
+    }
+    e.target.value = '';
+  });
+
+  document.getElementById('splatShow').addEventListener('change', (e) => {
+    if (splat.mesh) splat.mesh.visible = e.target.checked;
+    splat.lastKey = null;
+  });
+  document.getElementById('splatOpacity').addEventListener('input', (e) => {
+    if (splat.mat) splat.mat.uniforms.opacityScale.value = parseFloat(e.target.value);
+  });
+  document.getElementById('voxelOpacity').addEventListener('input', (e) => setVoxelOpacity(parseFloat(e.target.value)));
+  document.getElementById('splatBudget').addEventListener('input', (e) => {
+    document.getElementById('splatBudgetVal').textContent = splatBudgetLabel();
+    splat.lastKey = null;
+  });
+  document.getElementById('splatClip').addEventListener('change', () => { splat.lastKey = null; });
+  for (const id of ['splatPerm', 'splatFlipX', 'splatFlipY', 'splatFlipZ'])
+    document.getElementById(id).addEventListener('change', () => { readSplatAlignUI(); checkSplatMatch(); });
+  for (const id of ['splatOffX', 'splatOffY', 'splatOffZ', 'splatScale'])
+    document.getElementById(id).addEventListener('input', () => { readSplatAlignUI(); checkSplatMatch(); });
+  document.getElementById('splatAutoAlign').addEventListener('click', autoAlignSplats);
+  document.getElementById('splatCheck').addEventListener('click', checkSplatMatch);
+  document.getElementById('splatResetAlign').addEventListener('click', () => {
+    splat.perm = [0, 1, 2]; splat.sign = [-1, -1, 1]; splat.offset = [0, 0, 0]; splat.scale = 1;
+    applySplatTransform(); syncSplatAlignUI(); checkSplatMatch();
+  });
+  window.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) || '';
+    if (e.code === 'KeyV' && !/INPUT|SELECT|TEXTAREA/.test(tag) && splat.mesh) {
+      const cb = document.getElementById('splatShow');
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event('change'));
+    }
+  });
+}
+
 /* ---- boot ---- */
 initScene();
+initSplats();
 setupPointerHandlers();
 updateCameraFromState();
 </script>

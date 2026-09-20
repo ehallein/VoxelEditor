@@ -10,7 +10,7 @@ reverse-engineered and empirically verified against a real terrain file
 
 | File | What it is |
 |---|---|
-| `voxel_editor.html` | The whole app — single self-contained file (three.js via CDN, no build step). Open it in a browser, or keep it as a Claude.ai artifact. |
+| `voxel_editor.html` | The whole app — single self-contained file (three.js via CDN, no build step). Open it in a browser, or keep it as a Claude.ai artifact. Also renders the source Gaussian-splat `.ply` on top of the voxels (`PART 6`). |
 | `voxelcore.js` | The codec only (decode/encode/get/set/compact), as a standalone Node/CommonJS module. **This is a copy** of the same functions that are inlined in `voxel_editor.html` (`PART 1` in the file's own comments) — they need to be kept in sync by hand if you edit one. See "If you continue this in Claude Code" below for the obvious first fix. |
 | `test_voxelcore.js` | Round-trip + edit correctness tests for the codec, run against a real `.voxel.json`/`.voxel.bin` pair. |
 | `test_heightmap.js` | Correctness test for the minimap/overview height-scanning logic (brute-force per-voxel check vs. the tree-pruning traversal), clipped and unclipped. |
@@ -131,6 +131,59 @@ Search for these comment headers in the file:
   (bounds/resolution/version copied through, counts recomputed) → ZIP both
   files → `downloads.save()`.
 
+### Gaussian splats (`PART 6`)
+
+**Why**: the voxels are trained *from* a splat scene, so the question you
+usually want answered is "do these voxels still match the scene?". Loading
+the source `.ply` puts both in the same world space at once.
+
+- **Loading**: "Load splats (.ply)" in the header. Binary-little-endian PLY
+  only; properties are looked up **by name**, not by position, so the usual
+  INRIA order and `splat-transform`'s reordered output both work.
+  `scale_*` / `opacity` are activated (`exp` / sigmoid) or taken as-is
+  depending on a 2,000-vertex probe — a file with no negative scales and
+  opacity already in [0,1] is treated as pre-activated. Colour comes from
+  `f_dc_*` (SH DC, `0.5 + 0.282*f`) or from `red`/`green`/`blue`. A
+  PlayCanvas *compressed* `.ply` (the one with a `chunk` element) is
+  rejected with a message rather than parsed into nonsense.
+- **Renderer**: standard EWA splatting. Per splat the CPU builds the 3D
+  covariance `S = (R*D)(R*D)ᵀ` once; the vertex shader projects it with the
+  perspective Jacobian, takes the 2x2 result's eigenvectors as the axes of a
+  screen-space quad, and the fragment shader falls off as `exp(-r²)` inside
+  it. Alpha is premultiplied and blended back-to-front, **depth-tested but
+  not depth-written** — so the voxel surface occludes splats behind it,
+  which is what makes the overlay readable.
+  - Splat records live in a float `DataTexture` (4 RGBA texels each) and the
+    only instanced attribute is a float index into it, so a re-sort
+    re-uploads 4 bytes per splat instead of 64.
+  - **The quad's axes are (major axis, its perpendicular), which reverses
+    the winding**, so the material must be `DoubleSide`. With three.js's
+    default `FrontSide` every splat is back-face culled and you get a
+    perfectly black screen, no warning, shaders compiling fine. Do not
+    re-introduce it.
+- **Sorting**: a 16-bit counting sort on view-space Z, in a Blob worker,
+  with the same function running inline if `new Worker` throws (strict CSP
+  in an artifact sandbox). It re-runs when the view matrix's depth row
+  moves more than a small epsilon, so a still camera costs nothing.
+- **Alignment** (`splat.perm` / `sign` / `offset` / `scale`) lives on the
+  group's matrix, so covariances get transformed for free through
+  `modelViewMatrix`. The default is **(-x, -y, z)**: `splat-transform`
+  rotates the scene 180° about Z before voxelizing. That was not assumed —
+  all 48 signed axis permutations were scored against the octree's own
+  occupancy and that one won, 99.7% against 68% for the runner-up.
+- **"Auto-align"** re-runs exactly that search for any other pair (48
+  permutations, then coordinate descent on the translation at 2 m / 0.5 m /
+  0.1 m; ~45 ms on a 445k-splat file). **The match percentage** — the share
+  of sampled splat centres that land inside a solid voxel — is the number
+  to watch. The real `terrain.voxel` + `mesh.ply` pair scores **99.5%**; a
+  deliberately mismatched pair scored 42.7%, so the two cases are nowhere
+  near each other.
+- **Comparing**: "Voxel α" fades the voxel surface (one shared material for
+  every chunk now, hence one assignment) so the splats show through it;
+  "Splat α" does the same the other way; the height-clip slider can cut
+  both at the same plane; `V` toggles the splats; "Budget" draws 1-in-N
+  splats if a huge file needs it.
+
 ## Known limitations / good next things to check
 
 - **Overview mode has no inter-node face culling.** Every leaf/solid node
@@ -146,6 +199,14 @@ Search for these comment headers in the file:
   above the clip plane and it'll just be invisible until you raise the
   clip again. This is intentional (view-only clip) but worth knowing.
 - **Octant convention** — see the callout above under Format notes.
+- **Splats ignore spherical harmonics beyond DC.** `f_rest_*` is skipped, so
+  the overlay is view-independent — flatter than the same file in a real
+  splat viewer, but that has no bearing on judging alignment.
+- **Auto-align only searches axis permutations, flips and a translation.**
+  An arbitrary rotation between the two spaces would need real registration
+  (ICP of the splat centres against the voxel surface). The match
+  percentage would make it obvious that something like that is going on,
+  but the button would not fix it.
 
 ## If you continue this in Claude Code
 
