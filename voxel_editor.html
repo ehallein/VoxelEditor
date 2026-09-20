@@ -1497,7 +1497,7 @@ const flattenMarkerMaterial = new THREE.MeshBasicMaterial({ color: 0x7fe8de, dep
 const flattenMarkerSelMaterial = new THREE.MeshBasicMaterial({ color: 0xe0a458, depthTest: false });
 // the "add a point here" handles: present but quiet, so they read as an offer rather than
 // as part of the shape
-const flattenEdgeHandleMaterial = new THREE.MeshBasicMaterial({ color: 0x7fe8de, depthTest: false, transparent: true, opacity: 0.4 });
+const flattenEdgeHandleMaterial = new THREE.MeshBasicMaterial({ color: 0x2f7a73, depthTest: false, transparent: true, opacity: 0.55 });
 let flattenOverlay = null, flattenOverlaySig = null;
 
 function disposeFlattenOverlay() {
@@ -1854,7 +1854,7 @@ function drawMinimap() {
     if (state.polygonFinished) mmCtx.fill();
     mmCtx.stroke();
     if (state.polygonFinished && state.polygon.length >= 3) {
-      mmCtx.fillStyle = 'rgba(127,232,222,0.45)';
+      mmCtx.fillStyle = 'rgba(47,122,115,0.75)';
       for (let i = 0; i < state.polygon.length; i++) {
         const a = state.polygon[i], b = state.polygon[(i+1) % state.polygon.length];
         const [x,y] = toScreen((a.vx+b.vx)/2, (a.vz+b.vz)/2);
