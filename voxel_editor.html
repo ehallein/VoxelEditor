@@ -1049,7 +1049,7 @@ function setupPointerHandlers() {
     if (!dragging && state.tool === 'flatten' && state.flattenMode === 'polygon' && state.polygon.length > 0 && !state.polygonFinished) {
       const hit = surfacePointAt(e.clientX, e.clientY);
       if (hit && (!state.polygonHover || state.polygonHover.vx !== hit.vx || state.polygonHover.vz !== hit.vz)) {
-        state.polygonHover = { vx: hit.vx, vz: hit.vz };
+        state.polygonHover = { vx: hit.vx, vz: hit.vz, h: hit.topWorldY };
         drawMinimap();
       }
       return;
@@ -1240,6 +1240,35 @@ function sampleHeightWorldY(vx, vz) {
   const vy = sampleHeightVY(vx, vz);
   return vy == null ? null : columnTopWorldY(vy);
 }
+// The surface you actually clicked on, rather than whatever is highest in the column.
+// state.heightMap is the topmost solid voxel of a whole leaf block, so under (or merely
+// beside) an overhang it reports the roof, and a point picked on the ground below would
+// jump up onto it. Given the voxel-Y you picked, this walks the exact column: up through
+// the solid run you landed in, or down to the first solid voxel beneath you. Returns a
+// column height in voxels (solid count), or null when the column is empty.
+function surfaceVYNear(vx, vz, nearVY) {
+  if (!state.loaded || nearVY == null || isNaN(nearVY)) return sampleHeightVY(vx, vz);
+  let y = Math.max(0, Math.min(state.maxVY - 1, Math.round(nearVY)));
+  if (getV(vx, y, vz)) {
+    while (y + 1 < state.maxVY && getV(vx, y + 1, vz)) y++;
+    return y + 1;
+  }
+  for (let d = y - 1; d >= 0; d--) if (getV(vx, d, vz)) return d + 1;
+  return sampleHeightVY(vx, vz);
+}
+// the voxel a stored height names: a height is the *top face* of a column, so it is the
+// voxel just below that face
+function heightWorldToVY(worldY) {
+  if (worldY == null || isNaN(worldY) || !state.loaded) return null;
+  return (worldY - state.meta.gridBounds.min[1]) / state.meta.voxelResolution - 1;
+}
+// ...as a world Y (the top face of that surface), or null. `nearWorldY` is the height the
+// point was picked at; without one this falls back to the block heightmap.
+function surfaceWorldYNear(vx, vz, nearWorldY) {
+  if (!state.loaded) return null;
+  const vy = surfaceVYNear(vx, vz, heightWorldToVY(nearWorldY));
+  return vy == null ? null : columnTopWorldY(vy);
+}
 // world Y of the top face of a column that keeps `vy` solid voxels
 function columnTopWorldY(vy) { return state.meta.gridBounds.min[1] + vy * state.meta.voxelResolution; }
 // bilinear interpolation of the four box-corner heights (voxel-Y units) at point (px,pz)
@@ -1352,10 +1381,18 @@ document.getElementById('clearPolygon').addEventListener('click', () => { state.
 document.getElementById('sampleHeight').addEventListener('click', drawMinimap);
 function finishPolygon() {
   if (state.polygon.length < 3) return;
-  const cx = Math.floor(state.polygon.reduce((s,p)=>s+p.vx,0) / state.polygon.length / state.leafSize);
-  const cz = Math.floor(state.polygon.reduce((s,p)=>s+p.vz,0) / state.polygon.length / state.leafSize);
-  const h = cx>=0&&cz>=0&&cx<state.nbx&&cz<state.nbz ? state.heightMap[cx*state.nbz+cz] : -1;
-  if (h>=0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h+1)*state.meta.voxelResolution).toFixed(2);
+  // Seed the target from the heights the points were actually picked at. The block
+  // heightmap would report the top of the column, which under an overhang is its roof —
+  // trace a shape on the floor of one and the target used to jump up above your head.
+  const hs = state.polygon.map(p => p.h).filter(h => h != null && !isNaN(h));
+  if (hs.length) {
+    document.getElementById('flattenY').value = (hs.reduce((s, h) => s + h, 0) / hs.length).toFixed(2);
+  } else {
+    const cx = Math.floor(state.polygon.reduce((s,p)=>s+p.vx,0) / state.polygon.length / state.leafSize);
+    const cz = Math.floor(state.polygon.reduce((s,p)=>s+p.vz,0) / state.polygon.length / state.leafSize);
+    const h = cx>=0&&cz>=0&&cx<state.nbx&&cz<state.nbz ? state.heightMap[cx*state.nbz+cz] : -1;
+    if (h>=0) document.getElementById('flattenY').value = (state.meta.gridBounds.min[1] + (h+1)*state.meta.voxelResolution).toFixed(2);
+  }
   state.polygonHover = null;
   state.polygonFinished = true;
   renderPolygonPointList();
@@ -1382,9 +1419,15 @@ let polygonDrag = null;         // {index, source:'3d'|'mm'} while dragging a po
 let suppressPolygonClick = false; // a handled pointerdown must not also add a point on click
 
 // world Y of the previewed target surface at a point — the height the flatten controls
-// give, falling back to the terrain when they are still incomplete
-function flattenSurfaceY(px, pz, heightFn) {
+// give, falling back to the terrain when they are still incomplete. `pickedY` is the world
+// Y the point was picked at (a polygon vertex carries one): the fallback then follows the
+// surface you clicked instead of the top of the column, which under an overhang is its roof.
+function flattenSurfaceY(px, pz, heightFn, pickedY) {
   if (heightFn) return columnTopWorldY(heightFn(px, pz));
+  if (pickedY != null && !isNaN(pickedY)) {
+    const near = surfaceWorldYNear(Math.round(px), Math.round(pz), pickedY);
+    return near != null ? near : pickedY;
+  }
   const cur = sampleHeightVY(px, pz);
   return columnTopWorldY(cur != null ? cur : 0);
 }
@@ -1405,13 +1448,14 @@ function polygonHandlesWorld() {
   const poly = state.polygon;
   const gb = state.meta.gridBounds, res = state.meta.voxelResolution;
   const heightFn = flattenHeightFn().fn;
-  const at = (px, pz) => new THREE.Vector3(gb.min[0] + px * res, flattenSurfaceY(px, pz, heightFn), gb.min[2] + pz * res);
-  poly.forEach((pt, i) => out.push({ kind: 'vertex', index: i, p: at(pt.vx, pt.vz) }));
+  const at = (px, pz, pickedY) => new THREE.Vector3(gb.min[0] + px * res, flattenSurfaceY(px, pz, heightFn, pickedY), gb.min[2] + pz * res);
+  poly.forEach((pt, i) => out.push({ kind: 'vertex', index: i, p: at(pt.vx, pt.vz, pt.h) }));
   if (state.polygonFinished && poly.length >= 3) {
     for (let i = 0; i < poly.length; i++) {
       const a = poly[i], b = poly[(i + 1) % poly.length];
       const mx = (a.vx + b.vx) / 2, mz = (a.vz + b.vz) / 2;
-      out.push({ kind: 'edge', index: i, vx: Math.round(mx), vz: Math.round(mz), p: at(mx, mz) });
+      const mh = a.h != null && b.h != null && !isNaN(a.h) && !isNaN(b.h) ? (a.h + b.h) / 2 : null;
+      out.push({ kind: 'edge', index: i, vx: Math.round(mx), vz: Math.round(mz), p: at(mx, mz, mh) });
     }
   }
   return out;
@@ -1566,7 +1610,10 @@ function renderPolygonPointList() {
     container.appendChild(row);
   });
 }
-function resampleGradientHeights() {
+// `onlyMissing` fills in blanks without touching heights that are already set — what the
+// auto-seed when gradient mode is switched on wants, so the heights you picked in the 3D
+// view survive it. The Resample button passes nothing and overwrites everything.
+function resampleGradientHeights(onlyMissing) {
   if (state.flattenMode === 'box') {
     if (!state.flattenBox) return;
     const b = state.flattenBox;
@@ -1576,11 +1623,17 @@ function resampleGradientHeights() {
       if (h != null) document.getElementById(id).value = h.toFixed(2);
     }
   } else {
-    for (const p of state.polygon) { const h = sampleHeightWorldY(p.vx, p.vz); if (h != null) p.h = h; }
+    for (const p of state.polygon) {
+      const has = p.h != null && !isNaN(p.h);
+      if (onlyMissing && has) continue;
+      // resample the surface this point sits on, not the top of its column
+      const h = has ? surfaceWorldYNear(p.vx, p.vz, p.h) : sampleHeightWorldY(p.vx, p.vz);
+      if (h != null) p.h = h;
+    }
     renderPolygonPointList();
   }
 }
-document.getElementById('resampleGradient').addEventListener('click', resampleGradientHeights);
+document.getElementById('resampleGradient').addEventListener('click', () => resampleGradientHeights());
 // One setter, two writers: this checkbox and the VR dial's Gradient row (PART 7).
 function setFlattenGradient(on) {
   state.flattenGradient = !!on;
@@ -1590,8 +1643,8 @@ function setFlattenGradient(on) {
   document.getElementById('gradientHint').style.display = state.flattenGradient ? 'block' : 'none';
   updateGradientControlsVisibility();
   // turning it on with nothing to interpolate from is a row of blanks, so seed the
-  // corner/vertex heights off the terrain that is already there
-  if (state.flattenGradient) resampleGradientHeights();
+  // corner/vertex heights that have none yet off the terrain that is already there
+  if (state.flattenGradient) resampleGradientHeights(true);
   renderPolygonPointList();
   drawMinimap();
 }
@@ -1711,7 +1764,7 @@ function buildFlattenOverlay() {
   const wz = (vz) => gb.min[2] + vz * res;
   // falls back to the terrain itself, so an incomplete gradient still draws its outline
   // somewhere sensible instead of down at y=0
-  const surfaceY = (px, pz) => flattenSurfaceY(px, pz, heightFn);
+  const surfaceY = (px, pz, pickedY) => flattenSurfaceY(px, pz, heightFn, pickedY);
   const group = new THREE.Group();
 
   /* ---- the target surface itself, one quad per (possibly coarsened) column ---- */
@@ -1758,8 +1811,8 @@ function buildFlattenOverlay() {
       closed = true;
     }
   } else {
-    for (const pt of poly) ring.push([pt.vx, pt.vz]);
-    if (state.polygonHover && !state.polygonFinished) ring.push([state.polygonHover.vx, state.polygonHover.vz]);
+    for (const pt of poly) ring.push([pt.vx, pt.vz, pt.h]);
+    if (state.polygonHover && !state.polygonFinished) ring.push([state.polygonHover.vx, state.polygonHover.vz, state.polygonHover.h]);
     closed = state.polygonFinished;
   }
   if (ring.length >= 2) {
@@ -1772,7 +1825,8 @@ function buildFlattenOverlay() {
       for (let k = 0; k < n; k++) {
         for (const t of [k / n, (k + 1) / n]) {
           const px = a[0] + (b[0] - a[0]) * t, pz = a[1] + (b[1] - a[1]) * t;
-          lp.push(wx(px), surfaceY(px, pz) + res * 0.05, wz(pz));
+          const ph = a[2] != null && b[2] != null && !isNaN(a[2]) && !isNaN(b[2]) ? a[2] + (b[2] - a[2]) * t : null;
+          lp.push(wx(px), surfaceY(px, pz, ph) + res * 0.05, wz(pz));
         }
       }
     }
@@ -1791,7 +1845,7 @@ function buildFlattenOverlay() {
       markers.push([b.x0, b.z0], [b.x1 + 1, b.z0], [b.x0, b.z1 + 1], [b.x1 + 1, b.z1 + 1]);
     }
   } else {
-    for (const pt of poly) markers.push([pt.vx, pt.vz]);
+    for (const pt of poly) markers.push([pt.vx, pt.vz, pt.h]);
   }
   if (markers.length) {
     const markerGeo = new THREE.OctahedronGeometry(res * 0.9);
@@ -1799,9 +1853,12 @@ function buildFlattenOverlay() {
     const stemPos = [], stemCol = [];
     const cornerNames = ['-X-Z', '+X-Z', '-X+Z', '+X+Z'];
     markers.forEach((m, i) => {
-      const px = m[0], pz = m[1];
-      const target = surfaceY(px, pz);
-      const curVY = sampleHeightVY(px, pz);
+      const px = m[0], pz = m[1], pickedY = m[2];
+      const target = surfaceY(px, pz, pickedY);
+      // the ground the stem stands on is the surface this point was picked on, so a point
+      // under an overhang keeps its stem on the floor rather than on the roof above it
+      const curVY = isPoly ? surfaceVYNear(Math.round(px), Math.round(pz), heightWorldToVY(pickedY))
+                           : sampleHeightVY(px, pz);
       const ground = columnTopWorldY(curVY != null ? curVY : 0);
       const c = cutFillColor(heightFn ? heightFn(px, pz) : (curVY != null ? curVY : 0), curVY);
       stemPos.push(wx(px), ground, wz(pz), wx(px), target, wz(pz));
@@ -1831,8 +1888,9 @@ function buildFlattenOverlay() {
       for (let i = 0; i < poly.length; i++) {
         const a = poly[i], b = poly[(i + 1) % poly.length];
         const mx = (a.vx + b.vx) / 2, mz = (a.vz + b.vz) / 2;
+        const mh = a.h != null && b.h != null && !isNaN(a.h) && !isNaN(b.h) ? (a.h + b.h) / 2 : null;
         const h = new THREE.Mesh(edgeGeo, flattenEdgeHandleMaterial);
-        h.position.set(wx(mx), surfaceY(mx, mz), wz(mz));
+        h.position.set(wx(mx), surfaceY(mx, mz, mh), wz(mz));
         h.renderOrder = 12;
         group.add(h);
       }
@@ -3740,7 +3798,7 @@ function xrUpdateAim() {
         state.polygon.length > 0 && !state.polygonFinished && xrPtr.hand === -1) {
       const hit = surfacePointAtRay();
       if (hit && (!state.polygonHover || state.polygonHover.vx !== hit.vx || state.polygonHover.vz !== hit.vz)) {
-        state.polygonHover = { vx: hit.vx, vz: hit.vz };
+        state.polygonHover = { vx: hit.vx, vz: hit.vz, h: hit.topWorldY };
         drawMinimap();
       }
     }
