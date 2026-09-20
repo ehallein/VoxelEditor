@@ -189,14 +189,31 @@ the source `.ply` puts both in the same world space at once.
   silhouette survives but you read ridges from the far side through the
   near surface. Turning depth writes back on does not fix it: triangles
   inside one chunk are in scan order, not depth order, so a back-to-front
-  run still blends every layer. Each voxel mesh therefore draws its
-  geometry twice, as two groups over the same vertices — a depth-only
-  prepass (`voxelDepthMaterial`, `colorWrite: false`), then the shaded
-  pass with `depthWrite: false`, which only survives where it equals the
-  frontmost depth. One translucent skin per pixel, any alpha, any view
-  direction. Consequence to keep in mind: the see-through surface still
-  writes depth, so the splats switch to `depthTest: false` whenever voxel
-  α < 1, or they would be culled by a surface you are looking through.
+  run still blends every layer. So while the surface is see-through, each
+  voxel mesh draws its geometry twice, as two groups over the same
+  vertices — a depth-only prepass (`voxelDepthMaterial`,
+  `colorWrite: false`), then the shaded pass with `depthWrite: false`,
+  which only survives where it equals the frontmost depth. One translucent
+  skin per pixel, any alpha, any view direction.
+  - **The prepass is only ordered correctly when the two groups land in
+    different passes.** three sorts the opaque list by *program* before
+    position, so two groups of one mesh get split up and every shaded draw
+    can end up before every prepass — i.e. the whole surface drawn with no
+    depth writes into an empty depth buffer, which looks exactly like
+    depth testing being off. The prepass therefore runs only while the
+    shaded material is `transparent` (opaque pass, then transparent pass,
+    an ordering three does guarantee). At α = 1 it is switched off
+    entirely via `voxelDepthMaterial.visible = false` — three skips a group
+    whose material is invisible — and the surface writes its own depth like
+    any ordinary opaque mesh. If you ever want to check this, wrap
+    `renderer.renderBufferDirect` and log the material per draw; guessing
+    from screenshots does not work, the artefacts are view-dependent and
+    can be subtle.
+  - Consequence to keep in mind: the see-through surface still writes
+    depth, so the splats switch to `depthTest: false` whenever voxel α < 1,
+    or they would be culled by a surface you are looking through. That is
+    also why loading a `.ply` re-applies the current slider value — a
+    material created later would otherwise keep the default.
 
 ## Known limitations / good next things to check
 

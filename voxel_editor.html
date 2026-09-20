@@ -600,15 +600,23 @@ let scene, camera, renderer, chunkGroup;
 // panel's "Voxel α" slider can fade the whole voxel surface in one assignment.
 //
 // The voxel surface is a *solid* with interior and far-side faces behind whatever
-// you are looking at, so blending it naively turns it into a see-through scribble:
-// every depth layer along the ray blends, not just the surface you meant. So each
-// mesh draws its geometry twice, as two groups over the same vertices: first a
-// depth-only prepass, then the shaded pass with depth writes off, which only
-// survives where it equals the frontmost depth. That leaves exactly one translucent
-// skin per pixel, at any alpha, in any view direction.
-const chunkMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, depthWrite: false });
-const overviewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, depthWrite: false });
-const voxelDepthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false });
+// you are looking at, so fading it naively turns it into a see-through scribble:
+// every depth layer along the ray blends, not just the surface you meant. So when
+// it is see-through, each mesh draws its geometry twice, as two groups over the
+// same vertices: a depth-only prepass, then the shaded pass with depth writes off,
+// surviving only where it equals the frontmost depth. One translucent skin per
+// pixel, at any alpha, in any view direction.
+//
+// The prepass is only ordered correctly when the two groups land in *different*
+// passes: three sorts the opaque list by program before position, so two groups of
+// one mesh get split up and every shaded draw can end up before every prepass —
+// which is depth-testing against an empty buffer. So the prepass runs only while
+// the shaded material is transparent (opaque pass, then transparent pass, an
+// ordering three guarantees), and at full alpha it is switched off entirely and
+// the shaded material writes its own depth like any ordinary opaque surface.
+const chunkMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+const overviewMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+const voxelDepthMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, visible: false });
 // both groups cover the whole (non-indexed) geometry; three draws them in order
 function addVoxelDepthPrepass(geo, vertexCount) {
   geo.addGroup(0, vertexCount, 0); // voxelDepthMaterial
@@ -1882,6 +1890,7 @@ async function loadSplatPly(arrayBuffer, name) {
 
   hideProgress();
   applySplatTransform();
+  setVoxelOpacity(currentVoxelOpacity()); // the new material has to match the slider
   updateSplatUIAfterLoad();
 }
 
@@ -2090,15 +2099,23 @@ function updateSplatUIAfterLoad() {
 }
 function setVoxelOpacity(o) {
   const opaque = o >= 0.999;
+  // three skips a group whose material is invisible, so at full alpha the prepass
+  // costs nothing at all and the surface renders exactly as it did before splats.
+  voxelDepthMaterial.visible = !opaque;
   for (const m of [chunkMaterial, overviewMaterial]) {
     m.opacity = o;
-    m.transparent = !opaque;   // depth always comes from the prepass, never from here
+    m.transparent = !opaque;
+    m.depthWrite = opaque;   // see-through: the prepass owns depth instead
     m.needsUpdate = true;
   }
   // A see-through voxel surface still writes depth (that is what keeps it a single
   // skin), so the splats have to ignore that depth or they'd vanish behind a surface
   // you are looking through. At full alpha the voxels occlude them again, as normal.
   if (splat.mat) splat.mat.depthTest = opaque;
+}
+function currentVoxelOpacity() {
+  const el = document.getElementById('voxelOpacity');
+  return el ? parseFloat(el.value) : 1;
 }
 
 function initSplats() {
